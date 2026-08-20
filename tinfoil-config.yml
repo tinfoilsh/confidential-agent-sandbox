@@ -7,7 +7,7 @@ containers:
   # Answers the router. Holds the sandbox key binding; has a network but
   # no workspace.
   - name: "mcp-server"
-    image: "ghcr.io/tinfoilsh/confidential-agent-sandbox/mcp-server@sha256:0000000000000000000000000000000000000000000000000000000000000000" # placeholder - populated during release
+    image: "ghcr.io/tinfoilsh/confidential-agent-sandbox/mcp-server@sha256:0297223be4dee74ceed799d33afa3ac20b4f7253b1ed91335a1c87b4ea9bcb9c" # v0.0.1
     user: "1000:1000"
     read_only: true
     cap_drop: ["ALL"]
@@ -22,7 +22,7 @@ containers:
   # is what makes "the sandbox has no network access" true rather than a
   # promise made in a prompt.
   - name: "executor"
-    image: "ghcr.io/tinfoilsh/confidential-agent-sandbox/executor@sha256:0000000000000000000000000000000000000000000000000000000000000000" # placeholder - populated during release
+    image: "ghcr.io/tinfoilsh/confidential-agent-sandbox/executor@sha256:6d55c8f195013ec14b4cc3c0b640dda203489eddad4354bc3649b47d7e113adc" # v0.0.1
     user: "1000:1000"
     read_only: true
     tmpfs:
