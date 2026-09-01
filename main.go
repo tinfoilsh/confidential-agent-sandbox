@@ -40,6 +40,7 @@ import (
 	"io/fs"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -58,12 +59,21 @@ const (
 	// this listener is enclave-internal and plaintext by design.
 	listen = ":8080"
 
-	// workspace is a tmpfs declared in the measured config. What an owner writes
-	// lives in enclave memory and goes when the boot does, which is the same
-	// lifetime its enrollment has.
 	workspace = "/workspace"
 
 	maxFileBytes = 1 << 20
+
+	volumeName     = "workspace"
+	volumeControl  = "/run/tinfoil/volumes/" + volumeName + "/" + volumeSocket
+	volumeSocket   = "control.sock"
+	volumeKeyBytes = 64
+	volumeTimeout  = 10 * time.Second
+
+	opUnlock     = 1
+	opInitialize = 2
+
+	responseOK       = 0
+	responseRejected = 1
 
 	// An enrollment carries one P-256 SPKI DER key in base64, which is under
 	// 200 bytes of JSON. The limit is what keeps an unauthenticated body from
@@ -152,7 +162,6 @@ type sandbox struct {
 	issuer string
 	permit *ecdsa.PublicKey
 	nonce  string
-	files  *os.Root
 
 	// fingerprint identifies the host key sshd will present, minted at boot and
 	// reported by /healthz. A client reads it over the attested channel before it
@@ -167,6 +176,9 @@ type sandbox struct {
 	mu        sync.Mutex
 	owner     *ecdsa.PublicKey
 	listening bool
+	files     *os.Root
+
+	enrolling sync.Mutex
 }
 
 func main() {
@@ -202,16 +214,6 @@ func run() error {
 		return fmt.Errorf("SANDBOX_PERMIT_KEY: %w", err)
 	}
 	box.permit = permit
-
-	// Every file operation goes through a root confined to the workspace mount,
-	// so a path leaving it is an error the kernel returns rather than one this
-	// program has to be careful enough to prevent. Symlinks included.
-	files, err := os.OpenRoot(workspace)
-	if err != nil {
-		return err
-	}
-	defer files.Close()
-	box.files = files
 
 	// Everything sshd needs except a key to accept. Failing here is a refusal to
 	// boot, which is the only place a broken SSH policy can still be refused:
@@ -297,12 +299,20 @@ func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Key string `json:"key"`
+		Key    string `json:"key"`
+		Volume string `json:"volume"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxEnrollBytes)).Decode(&body); err != nil {
 		reply(w, http.StatusBadRequest, failure{"enrollment is not a JSON object naming a key"})
 		return
 	}
+	volumeKey, err := workspaceKey(body.Volume)
+	if err != nil {
+		log.Printf("enrollment refused: %v", err)
+		reply(w, http.StatusBadRequest, failure{"volume is not base64 for a 64-byte workspace key"})
+		return
+	}
+	defer clear(volumeKey)
 	owner, err := publicKey(body.Key)
 	if err != nil {
 		log.Printf("enrollment refused: %v", err)
@@ -318,9 +328,21 @@ func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusBadRequest, failure{"key cannot be used as an SSH credential"})
 		return
 	}
-	if err := s.claim(owner); err != nil {
+	s.enrolling.Lock()
+	defer s.enrolling.Unlock()
+	if s.ownerKey() != nil {
 		// The permit verified, so this is a valid permit arriving after the one
 		// that spent it: a replay, or a second holder of the same permit.
+		log.Printf("enrollment refused: an owner is already enrolled for this boot")
+		reply(w, http.StatusConflict, failure{"sandbox is already enrolled"})
+		return
+	}
+	if err := s.open(volumeKey); err != nil {
+		log.Printf("workspace refused the key: %v", err)
+		reply(w, http.StatusForbidden, failure{"workspace key refused"})
+		return
+	}
+	if err := s.claim(owner); err != nil {
 		log.Printf("enrollment refused: %v", err)
 		reply(w, http.StatusConflict, failure{"sandbox is already enrolled"})
 		return
@@ -332,6 +354,98 @@ func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("sandbox %s enrolled an owner for boot %s", s.domain, s.nonce)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func workspaceKey(encoded string) ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
+	if err != nil {
+		return nil, err
+	}
+	if len(key) != volumeKeyBytes {
+		clear(key)
+		return nil, fmt.Errorf("workspace key is %d bytes, want %d", len(key), volumeKeyBytes)
+	}
+	return key, nil
+}
+
+func (s *sandbox) open(key []byte) error {
+	unlocked, err := mounted(workspace)
+	if err != nil {
+		return err
+	}
+	if !unlocked {
+		if err := unlock(key); err != nil {
+			return err
+		}
+		if unlocked, err = mounted(workspace); err != nil {
+			return err
+		}
+		if !unlocked {
+			return errors.New("volume worker reported success without mounting the workspace")
+		}
+	}
+	// Every file operation goes through a root confined to the workspace mount,
+	// so a path leaving it is an error the kernel returns rather than one this
+	// program has to be careful enough to prevent. Symlinks included.
+	files, err := os.OpenRoot(workspace)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.files = files
+	return nil
+}
+
+func unlock(key []byte) error {
+	status, err := control(opInitialize, key)
+	if err != nil {
+		return err
+	}
+	if status == responseRejected {
+		if status, err = control(opUnlock, key); err != nil {
+			return err
+		}
+	}
+	if status != responseOK {
+		return fmt.Errorf("volume worker answered %d", status)
+	}
+	return nil
+}
+
+func control(operation byte, key []byte) (byte, error) {
+	connection, err := net.Dial("unixpacket", volumeControl)
+	if err != nil {
+		return 0, err
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(volumeTimeout)); err != nil {
+		return 0, err
+	}
+	var packet [volumeKeyBytes + 1]byte
+	defer clear(packet[:])
+	packet[0] = operation
+	copy(packet[1:], key)
+	if _, err := connection.Write(packet[:]); err != nil {
+		return 0, err
+	}
+	var status [1]byte
+	if _, err := connection.Read(status[:]); err != nil {
+		return 0, err
+	}
+	return status[0], nil
+}
+
+func mounted(path string) (bool, error) {
+	target, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	parent, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return false, err
+	}
+	return target.Sys().(*syscall.Stat_t).Dev != parent.Sys().(*syscall.Stat_t).Dev, nil
 }
 
 // prepare mints the host key and renders sshd's configuration. The host key is
@@ -465,13 +579,19 @@ func (s *sandbox) ownerKey() *ecdsa.PublicKey {
 	return s.owner
 }
 
+func (s *sandbox) root() *os.Root {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.files
+}
+
 // gate admits the enrolled owner and nobody else. The orchestrator's key is not
 // consulted here at all, so whoever launched this sandbox introduced its owner
 // once and has no way back in.
 func (s *sandbox) gate(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		owner := s.ownerKey()
-		if owner == nil {
+		if owner == nil || s.root() == nil {
 			reply(w, http.StatusUnauthorized, failure{"sandbox has no enrolled owner"})
 			return
 		}
@@ -556,7 +676,7 @@ func (s *sandbox) read(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("path")
 	if name == "" {
 		names := []string{}
-		if err := fs.WalkDir(s.files.FS(), ".", func(path string, entry fs.DirEntry, err error) error {
+		if err := fs.WalkDir(s.root().FS(), ".", func(path string, entry fs.DirEntry, err error) error {
 			if err == nil && !entry.IsDir() {
 				names = append(names, path)
 			}
@@ -568,7 +688,7 @@ func (s *sandbox) read(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, names)
 		return
 	}
-	content, err := s.files.ReadFile(name)
+	content, err := s.root().ReadFile(name)
 	if err != nil {
 		refuse(w, err)
 		return
@@ -586,11 +706,11 @@ func (s *sandbox) write(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusBadRequest, failure{"file is unreadable or larger than the workspace allows"})
 		return
 	}
-	if err := s.files.MkdirAll(filepath.Dir(name), 0o700); err != nil {
+	if err := s.root().MkdirAll(filepath.Dir(name), 0o700); err != nil {
 		refuse(w, err)
 		return
 	}
-	if err := s.files.WriteFile(name, content, 0o600); err != nil {
+	if err := s.root().WriteFile(name, content, 0o600); err != nil {
 		refuse(w, err)
 		return
 	}
@@ -598,7 +718,7 @@ func (s *sandbox) write(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *sandbox) remove(w http.ResponseWriter, r *http.Request) {
-	if err := s.files.Remove(r.URL.Query().Get("path")); err != nil {
+	if err := s.root().Remove(r.URL.Query().Get("path")); err != nil {
 		refuse(w, err)
 		return
 	}
