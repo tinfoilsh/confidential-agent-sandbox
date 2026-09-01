@@ -47,6 +47,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -61,6 +62,8 @@ const (
 
 	workspace = "/workspace"
 
+	lostFound = "lost+found"
+
 	maxFileBytes = 1 << 20
 
 	volumeName     = "workspace"
@@ -68,6 +71,9 @@ const (
 	volumeSocket   = "control.sock"
 	volumeKeyBytes = 64
 	volumeTimeout  = 10 * time.Second
+
+	sshdStartTimeout = 30 * time.Second
+	syncInterval     = 5 * time.Second
 
 	opUnlock     = 1
 	opInitialize = 2
@@ -82,16 +88,14 @@ const (
 
 	coordinate = 32 // bytes per ECDSA P-256 signature half, as JWS packs them
 
-	// sshPort is where sshd listens inside the container. tinfoil-config
-	// publishes it as the CVM's port 22, which is the only reason the measured
-	// firewall has a forward path to it.
-	sshPort = 22
+	// sshPort is where sshd listens inside the container. tinfoil-config maps it
+	// to the CVM's port 22, which is the only reason the measured firewall has a
+	// forward path to it.
+	sshPort = 2022
 
 	// sshRun is a tmpfs declared in the measured config, holding everything sshd
 	// reads: a host key minted at boot, the config rendered from the constant
-	// below, and the one authorized_keys an enrollment seals. The rootfs under it
-	// is read-only, the directory is root-owned, and an SSH session runs as
-	// sandboxUser -- so a session can read what sshd trusts and change none of it.
+	// below, and the one authorized_keys an enrollment seals.
 	sshRun     = "/run/sshd"
 	hostKey    = sshRun + "/host_key"
 	sshdConfig = sshRun + "/sshd_config"
@@ -99,9 +103,8 @@ const (
 
 	sshd = "/usr/sbin/sshd"
 
-	// The login account, created in the image with /workspace as its home. It is
-	// not the account this program runs as: an owner's shell cannot reach the
-	// sealed credential, the host key, or this process.
+	// The login account, created in the image with /workspace as its home, and
+	// also the account this program runs as.
 	sandboxUser = "sandbox"
 
 	// sshKeyType is the only key an enrollment can name, because publicKey
@@ -188,6 +191,8 @@ func main() {
 }
 
 func run() error {
+	syscall.Umask(0o077)
+
 	// DOMAIN is the only value that differs per sandbox, so it arrives through
 	// the unmeasured external config tinfoild writes at launch -- the same entry
 	// tinfoil-boot reads to get the certificate. A permit's subject is checked
@@ -368,21 +373,28 @@ func workspaceKey(encoded string) ([]byte, error) {
 	return key, nil
 }
 
+// open spends the workspace key on the volume and confines every later file
+// operation to it. The volume arrives as a mount propagated in from the worker:
+// this container's /workspace is an rslave bind of the directory the worker
+// mounts the decrypted device onto, so the proof that a key was accepted is
+// that the device behind /workspace changed. Asking instead whether /workspace
+// is a mount of its own would always answer yes -- the bind is one before any
+// volume exists behind it -- which would skip the unlock and leave the
+// workspace on container storage that no key protects and no restart survives.
 func (s *sandbox) open(key []byte) error {
-	unlocked, err := mounted(workspace)
+	locked, err := device(workspace)
 	if err != nil {
 		return err
 	}
-	if !unlocked {
-		if err := unlock(key); err != nil {
-			return err
-		}
-		if unlocked, err = mounted(workspace); err != nil {
-			return err
-		}
-		if !unlocked {
-			return errors.New("volume worker reported success without mounting the workspace")
-		}
+	if err := unlock(key); err != nil {
+		return err
+	}
+	unlocked, err := device(workspace)
+	if err != nil {
+		return err
+	}
+	if unlocked == locked {
+		return errors.New("volume worker reported success without mounting the workspace")
 	}
 	// Every file operation goes through a root confined to the workspace mount,
 	// so a path leaving it is an error the kernel returns rather than one this
@@ -436,16 +448,12 @@ func control(operation byte, key []byte) (byte, error) {
 	return status[0], nil
 }
 
-func mounted(path string) (bool, error) {
-	target, err := os.Stat(path)
+func device(path string) (uint64, error) {
+	info, err := os.Stat(path)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
-	parent, err := os.Stat(filepath.Dir(path))
-	if err != nil {
-		return false, err
-	}
-	return target.Sys().(*syscall.Stat_t).Dev != parent.Sys().(*syscall.Stat_t).Dev, nil
+	return info.Sys().(*syscall.Stat_t).Dev, nil
 }
 
 // prepare mints the host key and renders sshd's configuration. The host key is
@@ -501,6 +509,13 @@ func (s *sandbox) seal(line string) error {
 	s.mu.Lock()
 	s.listening = true
 	s.mu.Unlock()
+	if err := awaitListening(); err != nil {
+		return err
+	}
+	if err := os.Remove(hostKey); err != nil {
+		return err
+	}
+	go flush()
 	go func() {
 		err := daemon.Wait()
 		s.mu.Lock()
@@ -512,6 +527,27 @@ func (s *sandbox) seal(line string) error {
 	}()
 	log.Printf("ssh sealed to the enrolled key, listening on port %d as %s", sshPort, sandboxUser)
 	return nil
+}
+
+func flush() {
+	for range time.Tick(syncInterval) {
+		syscall.Sync()
+	}
+}
+
+func awaitListening() error {
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(sshPort))
+	deadline := time.Now().Add(sshdStartTimeout)
+	for {
+		connection, err := net.DialTimeout("tcp", address, time.Second)
+		if err == nil {
+			return connection.Close()
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("sshd did not listen on %d within %s: %w", sshPort, sshdStartTimeout, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // authorizedKey renders the owner's P-256 key as an authorized_keys line. The
@@ -677,6 +713,9 @@ func (s *sandbox) read(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		names := []string{}
 		if err := fs.WalkDir(s.root().FS(), ".", func(path string, entry fs.DirEntry, err error) error {
+			if path == lostFound {
+				return fs.SkipDir
+			}
 			if err == nil && !entry.IsDir() {
 				names = append(names, path)
 			}
@@ -714,6 +753,13 @@ func (s *sandbox) write(w http.ResponseWriter, r *http.Request) {
 		refuse(w, err)
 		return
 	}
+	// The VM is stopped by killing QEMU, so anything still in page cache is
+	// simply gone -- a file written and not flushed comes back after a restart
+	// with its name and mtime and no contents at all. A 204 here has to mean the
+	// bytes are on the volume. sync(2) rather than fsync because the directory
+	// entry of a new file needs flushing too, and this guest has nothing else
+	// writable for it to cost anything.
+	syscall.Sync()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -722,6 +768,9 @@ func (s *sandbox) remove(w http.ResponseWriter, r *http.Request) {
 		refuse(w, err)
 		return
 	}
+	// Durable for the same reason a write is: a deletion that does not survive
+	// the stop puts the file back.
+	syscall.Sync()
 	w.WriteHeader(http.StatusNoContent)
 }
 

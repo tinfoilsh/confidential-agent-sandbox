@@ -45,13 +45,14 @@ containers:
     # The digest is what makes the code running here part of the measurement.
     # The image workflow fills in the ghcr.io digest of the built image.
     image: ghcr.io/tinfoilsh/confidential-agent-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    user: "1000:1000"
     networks: [sealed]
     # Published as the CVM's port 22, which is the only forward path the measured
     # firewall opens to this container. sshd inside it accepts publickey against
     # the enrolled key and nothing else, and does not listen at all until one is
     # enrolled -- but the service behind a published port is outside what the
     # measurement can promise, so what stands there matters more than usual.
-    ports: ['22:22']
+    ports: ['22:2022']
     env:
       # A bare name is resolved per launch from the unmeasured external config
       # tinfoild writes, which is how one measured image serves every sandbox:
@@ -70,10 +71,9 @@ containers:
     read_only: true
     tmpfs:
       # Everything sshd reads: the host key minted at boot, the rendered policy,
-      # and the sealed authorized_keys. Root-owned, so a session can read what
-      # sshd trusts and rewrite none of it, and `noexec` because nothing here is
-      # ever a program.
-      /run/sshd: rw,noexec,nosuid,nodev,size=1m,mode=0755
+      # and the sealed authorized_keys. `noexec` because nothing here is ever a
+      # program.
+      /run/sshd: rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=1000,gid=1000
       # Scratch for the shell's own tools, since the rootfs is read-only.
       /tmp: rw,nosuid,nodev,size=16m,mode=1777
     pids_limit: 128
