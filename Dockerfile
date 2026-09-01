@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' -o /confidential
 # and the accounts declared below.
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 RUN apk add --no-cache openssh-server openssh-keygen \
-    # The login account owns nothing but its home, which is the workspace tmpfs
+    # The login account owns nothing but its home, which is the workspace volume
     # the measured config mounts at uid 1000. It is deliberately not the account
     # the server runs as: a session cannot reach the sealed credential, the host
     # key, or the process that wrote them.
