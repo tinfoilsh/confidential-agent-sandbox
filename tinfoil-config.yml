@@ -3,7 +3,7 @@
 # here is covered by the release measurement, so the container is pinned by
 # digest and the orchestrator allowed to enroll this sandbox's owner is named in
 # the document rather than chosen at launch.
-cvm-version: 0.11.0
+cvm-version: 0.14.0
 
 cpus: 2
 memory: 2048
