@@ -12,8 +12,7 @@ memory: 2048
 # every credential this sandbox honours arrives. It is deliberately not
 # `authenticated`: the sandbox checks its own credentials, so no Tinfoil API key
 # stands between an owner and the enclave. /enroll is the single call
-# orchestrator's permit buys -- it names the key that owns this boot -- and every
-# /workspace call after it is signed by that key.
+# orchestrator's permit buys -- it names the key that owns this boot.
 #
 # Port 22 below is the other door, and it is opened by the same key: the shell is
 # reachable only after /enroll has sealed that key into sshd's one authorized_keys.
@@ -23,7 +22,6 @@ shim:
   upstream-port: 8080
   authenticated: false
   paths:
-    - /workspace
     - /enroll
     - /healthz
 
