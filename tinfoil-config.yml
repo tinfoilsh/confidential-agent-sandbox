@@ -66,7 +66,7 @@ containers:
       - SANDBOX_PERMIT_ISSUER: https://orchestrator.tinfoil.sh
       # base64 SPKI DER of the public half of the orchestrator's permit key:
       #   openssl pkey -pubout -in permit.key.pem -outform DER | base64 -w0
-      - SANDBOX_PERMIT_KEY: replace-with-base64-spki-der
+      - SANDBOX_PERMIT_KEY: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEe7Dz4UoNi9fKoAq9DMgv+moqp+dyZyVSeRlAiVlFqZNAMLaamYJotUmKSR7OAT7AND1fC47oDfzOOX9nOs72ew==
     volumes: [workspace:/workspace]
     read_only: true
     tmpfs:
