@@ -44,7 +44,7 @@ containers:
   - name: sandbox
     # The digest is what makes the code running here part of the measurement.
     # The image workflow fills in the ghcr.io digest of the built image.
-    image: ghcr.io/tinfoilsh/confidential-agent-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    image: "ghcr.io/tinfoilsh/confidential-agent-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
     user: "1000:1000"
     networks: [sealed]
     # Published as the CVM's port 22, which is the only forward path the measured
