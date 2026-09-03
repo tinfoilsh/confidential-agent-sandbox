@@ -6,8 +6,7 @@
 //
 // The permit is spent by the call that uses it. After one POST /enroll succeeds
 // the orchestrator's key is never read again, so the party that launched the
-// sandbox cannot re-enter it: the workspace answers only to signatures from the
-// key that call enrolled. Before that call it answers to nobody at all.
+// sandbox cannot re-enter it.
 //
 // Both halves of every check are local. The orchestrator's key is pinned in the
 // measured config, so a client attesting this enclave is told who may introduce
@@ -15,13 +14,10 @@
 // enrollment outlives the boot it was made against. Verification therefore needs
 // no network and no stored state, and nothing here ever dials out.
 //
-// The enrolled key is also the sandbox's SSH credential. Enrollment seals it
+// The enrolled key is the sandbox's SSH credential. Enrollment seals it
 // into the one authorized_keys sshd will ever read and starts sshd, which is
 // configured for publickey and nothing else: no password, no keyboard-interactive,
 // no host-based, no second key, and no listener at all until an owner exists.
-// One key opens both doors, so the shell is reachable by exactly the party the
-// permit named and the measurement can say so without describing a second
-// credential.
 package main
 
 import (
@@ -37,7 +33,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"math/big"
 	"net"
@@ -45,7 +40,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -62,10 +56,6 @@ const (
 
 	workspace = "/workspace"
 
-	lostFound = "lost+found"
-
-	maxFileBytes = 1 << 20
-
 	volumeName     = "workspace"
 	volumeControl  = "/run/tinfoil/volumes/" + volumeName + "/" + volumeSocket
 	volumeSocket   = "control.sock"
@@ -81,10 +71,8 @@ const (
 	responseOK       = 0
 	responseRejected = 1
 
-	// An enrollment carries one P-256 SPKI DER key in base64, which is under
-	// 200 bytes of JSON. The limit is what keeps an unauthenticated body from
-	// being interesting.
-	maxEnrollBytes = 1 << 10
+	// The limit is what keeps an unauthenticated body from being interesting.
+	maxEnrollBytes = 1 << 12
 
 	coordinate = 32 // bytes per ECDSA P-256 signature half, as JWS packs them
 
@@ -103,15 +91,11 @@ const (
 
 	sshd = "/usr/sbin/sshd"
 
+	certificateSuffix = "-cert-v01@openssh.com"
+
 	// The login account, created in the image with /workspace as its home, and
 	// also the account this program runs as.
 	sandboxUser = "sandbox"
-
-	// sshKeyType is the only key an enrollment can name, because publicKey
-	// accepts nothing but P-256 -- so the SSH credential and the JWS credential
-	// are necessarily the same key.
-	sshKeyType  = "ecdsa-sha2-nistp256"
-	sshKeyCurve = "nistp256"
 )
 
 // sshdPolicy is sshd's whole configuration: publickey against one sealed file,
@@ -171,15 +155,14 @@ type sandbox struct {
 	// ever dials port 22, so the shell needs no trust-on-first-use.
 	fingerprint string
 
-	// owner is the key named by the one permit this boot honours, and nil until
+	// owner is the key named by the one permit this boot honours, and empty until
 	// then. That single field is the whole of the authorization state: with no
 	// owner the workspace serves nobody, and with one the orchestrator's key has
 	// no further use. listening follows it: sshd is started by the enrollment
 	// that seals the key, so before one there is no SSH listener to attack.
 	mu        sync.Mutex
-	owner     *ecdsa.PublicKey
+	owner     string
 	listening bool
-	files     *os.Root
 
 	enrolling sync.Mutex
 }
@@ -251,8 +234,7 @@ func run() error {
 	return nil
 }
 
-// handler serves the exact paths the shim's allowlist names, so the workspace
-// is one path under three verbs rather than a family of them.
+// handler serves the exact paths the shim's allowlist names.
 func (s *sandbox) handler() http.Handler {
 	mux := http.NewServeMux()
 	// Open by necessity: a permit is bound to this nonce, so orchestrator has
@@ -261,9 +243,6 @@ func (s *sandbox) handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	// The one call a permit authorizes, and the only one it ever will.
 	mux.HandleFunc("POST /enroll", s.enroll)
-	mux.HandleFunc("GET /workspace", s.gate(s.read))
-	mux.HandleFunc("POST /workspace", s.gate(s.write))
-	mux.HandleFunc("DELETE /workspace", s.gate(s.remove))
 	return mux
 }
 
@@ -273,7 +252,7 @@ func (s *sandbox) handler() http.Handler {
 // and an owner who finds a boot it did not enroll knows to stop talking to it.
 func (s *sandbox) health(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	enrolled, listening := s.owner != nil, s.listening
+	enrolled, listening := s.owner != "", s.listening
 	s.mu.Unlock()
 	reply(w, http.StatusOK, map[string]any{
 		"domain":   s.domain,
@@ -298,7 +277,7 @@ func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusUnauthorized, failure{"missing permit"})
 		return
 	}
-	if err := s.check(token, s.permit); err != nil {
+	if err := s.check(token); err != nil {
 		log.Printf("permit refused: %v", err)
 		reply(w, http.StatusForbidden, failure{"permit refused"})
 		return
@@ -318,24 +297,15 @@ func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clear(volumeKey)
-	owner, err := publicKey(body.Key)
+	line, err := authorizedKey(body.Key)
 	if err != nil {
 		log.Printf("enrollment refused: %v", err)
-		reply(w, http.StatusBadRequest, failure{"key is not base64 SPKI DER for a P-256 public key"})
-		return
-	}
-	// Rendered before the claim, so a key that could not be an SSH credential
-	// does not get to spend the permit: both doors are opened by one call or
-	// neither is.
-	line, err := authorizedKey(owner)
-	if err != nil {
-		log.Printf("enrollment refused: %v", err)
-		reply(w, http.StatusBadRequest, failure{"key cannot be used as an SSH credential"})
+		reply(w, http.StatusBadRequest, failure{"key is not one SSH public key"})
 		return
 	}
 	s.enrolling.Lock()
 	defer s.enrolling.Unlock()
-	if s.ownerKey() != nil {
+	if s.ownerKey() != "" {
 		// The permit verified, so this is a valid permit arriving after the one
 		// that spent it: a replay, or a second holder of the same permit.
 		log.Printf("enrollment refused: an owner is already enrolled for this boot")
@@ -347,7 +317,7 @@ func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusForbidden, failure{"workspace key refused"})
 		return
 	}
-	if err := s.claim(owner); err != nil {
+	if err := s.claim(line); err != nil {
 		log.Printf("enrollment refused: %v", err)
 		reply(w, http.StatusConflict, failure{"sandbox is already enrolled"})
 		return
@@ -373,11 +343,10 @@ func workspaceKey(encoded string) ([]byte, error) {
 	return key, nil
 }
 
-// open spends the workspace key on the volume and confines every later file
-// operation to it. The volume arrives as a mount propagated in from the worker:
-// this container's /workspace is an rslave bind of the directory the worker
-// mounts the decrypted device onto, so the proof that a key was accepted is
-// that the device behind /workspace changed. Asking instead whether /workspace
+// open spends the workspace key on the volume. The volume arrives as a mount
+// propagated in from the worker: this container's /workspace is an rslave bind
+// of the directory the worker mounts the decrypted device onto, so the proof
+// that a key was accepted is that the device behind /workspace changed. Asking instead whether /workspace
 // is a mount of its own would always answer yes -- the bind is one before any
 // volume exists behind it -- which would skip the unlock and leave the
 // workspace on container storage that no key protects and no restart survives.
@@ -396,16 +365,6 @@ func (s *sandbox) open(key []byte) error {
 	if unlocked == locked {
 		return errors.New("volume worker reported success without mounting the workspace")
 	}
-	// Every file operation goes through a root confined to the workspace mount,
-	// so a path leaving it is an error the kernel returns rather than one this
-	// program has to be careful enough to prevent. Symlinks included.
-	files, err := os.OpenRoot(workspace)
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.files = files
 	return nil
 }
 
@@ -521,8 +480,7 @@ func (s *sandbox) seal(line string) error {
 		s.mu.Lock()
 		s.listening = false
 		s.mu.Unlock()
-		// Nothing restarts it: the sealed key is spent, so a sandbox that loses
-		// sshd keeps serving the workspace over the door that still works.
+		// Nothing restarts it: the sealed key is spent.
 		log.Printf("sshd exited: %v", err)
 	}()
 	log.Printf("ssh sealed to the enrolled key, listening on port %d as %s", sshPort, sandboxUser)
@@ -550,22 +508,25 @@ func awaitListening() error {
 	}
 }
 
-// authorizedKey renders the owner's P-256 key as an authorized_keys line. The
-// SSH credential is the enrollment key itself -- the same key that signs every
-// /workspace call -- so the second door introduces no second secret and no third
-// party. The wire format is three length-prefixed strings, which is the whole
-// reason this program still has no dependencies to audit.
-func authorizedKey(key *ecdsa.PublicKey) (string, error) {
-	point, err := key.Bytes()
+func authorizedKey(line string) (string, error) {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return "", errors.New("line is not a type and a key")
+	}
+	if strings.HasSuffix(fields[0], certificateSuffix) {
+		return "", errors.New("line names a certificate, not a key")
+	}
+	blob, err := base64.StdEncoding.DecodeString(fields[1])
 	if err != nil {
 		return "", err
 	}
-	var blob []byte
-	for _, field := range [][]byte{[]byte(sshKeyType), []byte(sshKeyCurve), point} {
-		blob = binary.BigEndian.AppendUint32(blob, uint32(len(field)))
-		blob = append(blob, field...)
+	if len(blob) < 4 || len(blob) < 4+int(binary.BigEndian.Uint32(blob)) {
+		return "", errors.New("key is not an SSH public key blob")
 	}
-	return sshKeyType + " " + base64.StdEncoding.EncodeToString(blob) + "\n", nil
+	if named := string(blob[4 : 4+binary.BigEndian.Uint32(blob)]); named != fields[0] {
+		return "", fmt.Errorf("key is a %s, not the %s the line names", named, fields[0])
+	}
+	return fields[0] + " " + fields[1] + "\n", nil
 }
 
 // digest is the SHA256 fingerprint of a public key file, in the form ssh-keygen
@@ -599,60 +560,26 @@ func command(name string, args ...string) error {
 
 // claim names the owner, once. Every later caller is refused -- including the
 // holder of the permit that won, which is what stops a permit being replayed.
-func (s *sandbox) claim(owner *ecdsa.PublicKey) error {
+func (s *sandbox) claim(owner string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.owner != nil {
+	if s.owner != "" {
 		return errors.New("an owner is already enrolled for this boot")
 	}
 	s.owner = owner
 	return nil
 }
 
-func (s *sandbox) ownerKey() *ecdsa.PublicKey {
+func (s *sandbox) ownerKey() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.owner
 }
 
-func (s *sandbox) root() *os.Root {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.files
-}
-
-// gate admits the enrolled owner and nobody else. The orchestrator's key is not
-// consulted here at all, so whoever launched this sandbox introduced its owner
-// once and has no way back in.
-func (s *sandbox) gate(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		owner := s.ownerKey()
-		if owner == nil || s.root() == nil {
-			reply(w, http.StatusUnauthorized, failure{"sandbox has no enrolled owner"})
-			return
-		}
-		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok {
-			reply(w, http.StatusUnauthorized, failure{"missing token"})
-			return
-		}
-		if err := s.check(token, owner); err != nil {
-			// Which check failed describes the token the caller already holds,
-			// so it is logged inside the enclave and not answered with.
-			log.Printf("token refused: %v", err)
-			reply(w, http.StatusForbidden, failure{"token refused"})
-			return
-		}
-		next(w, r)
-	}
-}
-
 // check verifies one JWS against one key: ES256 over the signing input, then the
-// claims that tie it to this boot of this sandbox. Orchestrator's permit and the
-// owner's own tokens are the same shape, so enrolling changes which key is
-// trusted and nothing else. The signature is checked first, so no claim is ever
-// read from an unsigned token.
-func (s *sandbox) check(token string, key *ecdsa.PublicKey) error {
+// claims that tie it to this boot of this sandbox. The signature is checked
+// first, so no claim is ever read from an unsigned token.
+func (s *sandbox) check(token string) error {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return errors.New("token is not a JWS")
@@ -674,7 +601,7 @@ func (s *sandbox) check(token string, key *ecdsa.PublicKey) error {
 		return fmt.Errorf("token signature is %d bytes, want %d", len(signature), 2*coordinate)
 	}
 	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	if !ecdsa.Verify(key,
+	if !ecdsa.Verify(s.permit,
 		digest[:],
 		new(big.Int).SetBytes(signature[:coordinate]),
 		new(big.Int).SetBytes(signature[coordinate:]),
@@ -705,91 +632,7 @@ func (s *sandbox) check(token string, key *ecdsa.PublicKey) error {
 	return nil
 }
 
-// read answers a named file, or every file in the workspace when no name is
-// given, since a workspace nobody can enumerate is one you must remember by
-// heart. The walk is recursive because a write may have nested.
-func (s *sandbox) read(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("path")
-	if name == "" {
-		names := []string{}
-		if err := fs.WalkDir(s.root().FS(), ".", func(path string, entry fs.DirEntry, err error) error {
-			if path == lostFound {
-				return fs.SkipDir
-			}
-			if err == nil && !entry.IsDir() {
-				names = append(names, path)
-			}
-			return err
-		}); err != nil {
-			fail(w, err)
-			return
-		}
-		reply(w, http.StatusOK, names)
-		return
-	}
-	content, err := s.root().ReadFile(name)
-	if err != nil {
-		refuse(w, err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	if _, err := w.Write(content); err != nil {
-		log.Printf("response failed: %v", err)
-	}
-}
-
-func (s *sandbox) write(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("path")
-	content, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxFileBytes))
-	if err != nil {
-		reply(w, http.StatusBadRequest, failure{"file is unreadable or larger than the workspace allows"})
-		return
-	}
-	if err := s.root().MkdirAll(filepath.Dir(name), 0o700); err != nil {
-		refuse(w, err)
-		return
-	}
-	if err := s.root().WriteFile(name, content, 0o600); err != nil {
-		refuse(w, err)
-		return
-	}
-	// The VM is stopped by killing QEMU, so anything still in page cache is
-	// simply gone -- a file written and not flushed comes back after a restart
-	// with its name and mtime and no contents at all. A 204 here has to mean the
-	// bytes are on the volume. sync(2) rather than fsync because the directory
-	// entry of a new file needs flushing too, and this guest has nothing else
-	// writable for it to cost anything.
-	syscall.Sync()
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *sandbox) remove(w http.ResponseWriter, r *http.Request) {
-	if err := s.root().Remove(r.URL.Query().Get("path")); err != nil {
-		refuse(w, err)
-		return
-	}
-	// Durable for the same reason a write is: a deletion that does not survive
-	// the stop puts the file back.
-	syscall.Sync()
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// refuse answers a file operation the workspace would not perform. A path that
-// left the root, named a directory, or was never there is the caller's mistake;
-// which of those it was stays in the enclave log.
-func refuse(w http.ResponseWriter, err error) {
-	log.Printf("workspace refused: %v", err)
-	if errors.Is(err, fs.ErrNotExist) {
-		reply(w, http.StatusNotFound, failure{"no such file"})
-		return
-	}
-	reply(w, http.StatusBadRequest, failure{"path is not usable"})
-}
-
-// publicKey reads a P-256 verifying key as base64 SPKI DER. Both keys this
-// program trusts arrive that way: the orchestrator's from the measured config,
-// so the document a client attests names who may introduce an owner, and the
-// owner's from the enrollment call that named it.
+// publicKey reads a P-256 verifying key as base64 SPKI DER.
 func publicKey(encoded string) (*ecdsa.PublicKey, error) {
 	if encoded == "" {
 		return nil, errors.New("no key given")
@@ -832,11 +675,6 @@ func decode(segment string, into any) error {
 
 type failure struct {
 	Error string `json:"error"`
-}
-
-func fail(w http.ResponseWriter, err error) {
-	log.Printf("request failed: %v", err)
-	reply(w, http.StatusInternalServerError, failure{"internal error"})
 }
 
 func reply(w http.ResponseWriter, status int, body any) {
