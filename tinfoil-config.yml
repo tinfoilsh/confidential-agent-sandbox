@@ -37,6 +37,29 @@ volumes:
   - name: workspace
     exec: true
     owner: 1000
+    # The store the container sees: the pack is the lower layer and this volume
+    # holds the upper, merged by the CVM at the moment an enrollment unlocks the
+    # volume. Nothing is copied, so the toolchain costs no space here and stays
+    # the pack's bytes until a session writes over one of them -- and a session
+    # can, which is the whole point of the upper layer and the reason a client
+    # attests the pack rather than whatever /nix holds later. The target is the
+    # volume root's own `store`, because the volume is mounted at /nix below and
+    # nix will not accept a store reached through a symlink.
+    overlays:
+      - model: nix
+        source: nix/store
+        target: store
+
+# The sandbox's toolchain: a nix closure packed as a dm-verity EROFS image by
+# nix-closure's pack.sh and pinned here by root hash. The pack carries the store
+# and the database describing it, so the overlay above needs to copy nothing and
+# nix finds every path in it already valid -- which is the only shape egress
+# closed permits, since there is nowhere to fetch a missing path from. repo and
+# mwp come from pack.sh's .info.
+models:
+  - name: nix
+    repo: "nix/sandbox-toolchain@00000000000000000000000000000000"
+    mwp: "0000000000000000000000000000000000000000000000000000000000000000_0_00000000-0000-0000-0000-000000000000"
 
 containers:
   - name: sandbox
@@ -45,6 +68,9 @@ containers:
     image: "ghcr.io/tinfoilsh/confidential-agent-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
     user: "1000:1000"
     networks: [sealed]
+    # The grant is what binds the pack read-only at /tinfoil/models/nix, and
+    # what keeps it out of every other container's namespace.
+    models: [nix]
     # Published as the CVM's port 22, which is the only forward path the measured
     # firewall opens to this container. sshd inside it accepts publickey against
     # the enrolled key and nothing else, and does not listen at all until one is
@@ -65,7 +91,13 @@ containers:
       # base64 SPKI DER of the public half of the orchestrator's permit key:
       #   openssl pkey -pubout -in permit.key.pem -outform DER | base64 -w0
       - SANDBOX_PERMIT_KEY: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEe7Dz4UoNi9fKoAq9DMgv+moqp+dyZyVSeRlAiVlFqZNAMLaamYJotUmKSR7OAT7AND1fC47oDfzOOX9nOs72ew==
-    volumes: [workspace:/workspace]
+      # The closure's top-level path, which is hash-named and so cannot be baked
+      # into the image. Pinned here rather than injected: the root hash above
+      # says which bytes are mounted, and this says which of them run.
+      - SANDBOX_TOOLCHAIN: /nix/store/00000000000000000000000000000000-sandbox-toolchain
+    # Mounted twice: once as the session's own filesystem, and once as /nix,
+    # where the backed `store` and nix's writable state beside it land.
+    volumes: [workspace:/workspace, workspace:/nix]
     read_only: true
     tmpfs:
       # Everything sshd reads: the host key minted at boot, the rendered policy,

@@ -56,6 +56,20 @@ const (
 
 	workspace = "/workspace"
 
+	// The login account's home, which the image points at and only an unlocked
+	// volume can hold. Everything else on this volume is the volume worker's:
+	// the measured config has it back the store with the toolchain pack, so
+	// /nix exists before this program could create anything in its place.
+	home = workspace + "/home"
+
+	// Where the store resolves for anything following an absolute path out of a
+	// nix-built program, which is every one of them.
+	nixStorePrefix = "/nix/store/"
+
+	// The rest of PATH for every session. The image's own directories stay on it
+	// because the login shell is one of them.
+	imagePath = "/usr/local/bin:/usr/bin:/bin"
+
 	volumeName     = "workspace"
 	volumeControl  = "/run/tinfoil/volumes/" + volumeName + "/" + volumeSocket
 	volumeSocket   = "control.sock"
@@ -93,8 +107,8 @@ const (
 
 	certificateSuffix = "-cert-v01@openssh.com"
 
-	// The login account, created in the image with /workspace as its home, and
-	// also the account this program runs as.
+	// The login account, created in the image with /home/sandbox as its home,
+	// and also the account this program runs as.
 	sandboxUser = "sandbox"
 )
 
@@ -135,6 +149,10 @@ ClientAliveInterval 60
 ClientAliveCountMax 3
 PrintMotd no
 
+# The toolchain is reachable only by store path without this, and a profile
+# script is not read by a session that carries a command.
+SetEnv PATH=%s
+
 # Every accepted key is logged with its fingerprint, which is the only record
 # this boot keeps of who came in and dies with it.
 LogLevel VERBOSE
@@ -149,6 +167,12 @@ type sandbox struct {
 	issuer string
 	permit *ecdsa.PublicKey
 	nonce  string
+
+	// toolchain is the closure's top-level store path, pinned in the measured
+	// config beside the root hash of the pack that holds it: the pack proves
+	// which bytes are mounted, and this names the one path in it a session is
+	// put on PATH. A hash-named path cannot be baked into the image.
+	toolchain string
 
 	// fingerprint identifies the host key sshd will present, minted at boot and
 	// reported by /healthz. A client reads it over the attested channel before it
@@ -202,6 +226,10 @@ func run() error {
 		return fmt.Errorf("SANDBOX_PERMIT_KEY: %w", err)
 	}
 	box.permit = permit
+	box.toolchain = os.Getenv("SANDBOX_TOOLCHAIN")
+	if !strings.HasPrefix(box.toolchain, nixStorePrefix) {
+		return fmt.Errorf("SANDBOX_TOOLCHAIN is not a %s path", nixStorePrefix)
+	}
 
 	// Everything sshd needs except a key to accept. Failing here is a refusal to
 	// boot, which is the only place a broken SSH policy can still be refused:
@@ -317,6 +345,11 @@ func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusForbidden, failure{"workspace key refused"})
 		return
 	}
+	if err := provision(); err != nil {
+		log.Printf("workspace provisioning failed: %v", err)
+		reply(w, http.StatusInternalServerError, failure{"workspace could not be provisioned"})
+		return
+	}
 	if err := s.claim(line); err != nil {
 		log.Printf("enrollment refused: %v", err)
 		reply(w, http.StatusConflict, failure{"sandbox is already enrolled"})
@@ -329,6 +362,16 @@ func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("sandbox %s enrolled an owner for boot %s", s.domain, s.nonce)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// provision creates the home directory the image's symlink points at, which is
+// possible only here: the volume behind /workspace is the one the unlock above
+// mounted, and a restart that reuses it finds it already there.
+func provision() error {
+	if err := os.Mkdir(home, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return nil
 }
 
 func workspaceKey(encoded string) ([]byte, error) {
@@ -424,7 +467,7 @@ func (s *sandbox) prepare() error {
 	if err := command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", hostKey); err != nil {
 		return fmt.Errorf("host key: %w", err)
 	}
-	policy := fmt.Sprintf(sshdPolicy, sshPort, hostKey, authorized, sandboxUser)
+	policy := fmt.Sprintf(sshdPolicy, sshPort, hostKey, authorized, sandboxUser, s.toolchain+"/bin:"+imagePath)
 	// Readable so sshd can read it after dropping to the login account, and
 	// writable by nobody: the directory is root-owned on a read-only rootfs.
 	if err := os.WriteFile(sshdConfig, []byte(policy), 0o444); err != nil {
