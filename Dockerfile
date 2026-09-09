@@ -26,10 +26,22 @@ RUN apk add --no-cache openssh-server openssh-keygen \
  && printf '%s\n' \
     'experimental-features = nix-command flakes local-overlay-store read-only-local-store' \
     'store = local-overlay://?root=/&lower-store=local%3Froot%3D%2Ftinfoil%2Fmodels%2Fnix%26read-only%3Dtrue&upper-layer=/nix/store.upper&check-mount=false' \
+    # Resolves nixpkgs to the tree the pack was built from, so what it holds is never fetched again.
+    'flake-registry = /nix/var/nix/profiles/default/etc/nix/registry.json' \
     'build-users-group =' \
     'sandbox = false' \
     'substituters =' \
     > /etc/nix/nix.conf \
+    # Alpine's /etc/profile assigns PATH before it reads this directory, so the
+    # toolchain is put back here. Both scripts ship in the pack: nix's own puts the
+    # profile on PATH, the sandbox one sets what a store path cannot bake in.
+ && printf '%s\n' \
+    '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' \
+    '. /nix/var/nix/profiles/default/etc/profile.d/50-sandbox.sh' \
+    > /etc/profile.d/nix.sh \
+    # Scripts hardcode both, and the pack is mounted at /nix, so they are the image's to provide.
+ && ln -s /nix/var/nix/profiles/default/bin/bash /bin/bash \
+ && ln -sf /nix/var/nix/profiles/default/bin/env /usr/bin/env \
     # sshd refuses a login for an account whose password field is locked, even
     # for publickey, so the field is set to a value no password can hash to
     # instead of the `!` adduser leaves. Password authentication is refused by

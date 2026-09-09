@@ -59,9 +59,11 @@ const (
 	// The login account's home, which only an unlocked volume can hold.
 	home = workspace + "/home"
 
-	// The volume is mounted at /nix; nix refuses a store reached through a symlink.
-	nixStore       = "/nix/store"
-	nixStorePrefix = nixStore + "/"
+	// The pack names its closure without the hash at packProfile. The volume
+	// gets a link to it so the image can use nix's own path for both.
+	packProfile = "/tinfoil/models/nix/nix/var/nix/profiles/default"
+	profiles    = "/nix/var/nix/profiles"
+	profile     = profiles + "/default"
 
 	// The login shell is one of these, so the image's directories stay on PATH.
 	imagePath = "/usr/local/bin:/usr/bin:/bin"
@@ -164,9 +166,6 @@ type sandbox struct {
 	permit *ecdsa.PublicKey
 	nonce  string
 
-	// The closure's top-level store path; hash-named, so the config pins it.
-	toolchain string
-
 	// fingerprint identifies the host key sshd will present, minted at boot and
 	// reported by /healthz. A client reads it over the attested channel before it
 	// ever dials port 22, so the shell needs no trust-on-first-use.
@@ -219,10 +218,6 @@ func run() error {
 		return fmt.Errorf("SANDBOX_PERMIT_KEY: %w", err)
 	}
 	box.permit = permit
-	box.toolchain = os.Getenv("SANDBOX_TOOLCHAIN")
-	if !strings.HasPrefix(box.toolchain, nixStorePrefix) {
-		return fmt.Errorf("SANDBOX_TOOLCHAIN is not a %s path", nixStorePrefix)
-	}
 
 	// Everything sshd needs except a key to accept. Failing here is a refusal to
 	// boot, which is the only place a broken SSH policy can still be refused:
@@ -391,6 +386,12 @@ func (s *sandbox) open(key []byte) error {
 	if unlocked == locked {
 		return errors.New("volume worker reported success without mounting the workspace")
 	}
+	if err := os.MkdirAll(profiles, 0o755); err != nil {
+		return err
+	}
+	if err := os.Symlink(packProfile, profile); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
 	return nil
 }
 
@@ -464,7 +465,7 @@ func (s *sandbox) prepare() error {
 	if err := command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", hostKey); err != nil {
 		return fmt.Errorf("host key: %w", err)
 	}
-	policy := fmt.Sprintf(sshdPolicy, sshPort, hostKey, authorized, sandboxUser, s.toolchain+"/bin:"+imagePath)
+	policy := fmt.Sprintf(sshdPolicy, sshPort, hostKey, authorized, sandboxUser, profile+"/bin:"+imagePath)
 	if err := os.WriteFile(sshdConfig, []byte(policy), 0o444); err != nil {
 		return err
 	}
