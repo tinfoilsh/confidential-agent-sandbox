@@ -46,8 +46,8 @@ models:
   - name: nix
     # The pack holds programs, not weights.
     exec: true
-    repo: "nix/sandbox-toolchain@00000000000000000000000000000000"
-    mwp: "0000000000000000000000000000000000000000000000000000000000000000_0_00000000-0000-0000-0000-000000000000"
+    repo: "nix/sandbox-toolchain@fc8qyjk64a7la5w5df6488aghngjm2dk"
+    mwp: "fc985db266d830961b6ea3cd34f4a9cccbaedf5293e83d011a26a40c52fdbd5d_17142001664_0c3ba5aa-8049-573b-b865-3e04895160f3"
 
 containers:
   - name: sandbox
