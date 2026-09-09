@@ -56,6 +56,16 @@ const (
 
 	workspace = "/workspace"
 
+	// The login account's home, which only an unlocked volume can hold.
+	home = workspace + "/home"
+
+	// The volume is mounted at /nix; nix refuses a store reached through a symlink.
+	nixStore       = "/nix/store"
+	nixStorePrefix = nixStore + "/"
+
+	// The login shell is one of these, so the image's directories stay on PATH.
+	imagePath = "/usr/local/bin:/usr/bin:/bin"
+
 	volumeName     = "workspace"
 	volumeControl  = "/run/tinfoil/volumes/" + volumeName + "/" + volumeSocket
 	volumeSocket   = "control.sock"
@@ -65,11 +75,13 @@ const (
 	sshdStartTimeout = 30 * time.Second
 	syncInterval     = 5 * time.Second
 
-	opUnlock     = 1
-	opInitialize = 2
+	opUnlock     = "unlock"
+	opInitialize = "initialize"
 
-	responseOK       = 0
-	responseRejected = 1
+	statusOK       = "ok"
+	statusRejected = "rejected"
+
+	maxStatusBytes = 1 << 8
 
 	// The limit is what keeps an unauthenticated body from being interesting.
 	maxEnrollBytes = 1 << 12
@@ -93,8 +105,7 @@ const (
 
 	certificateSuffix = "-cert-v01@openssh.com"
 
-	// The login account, created in the image with /workspace as its home, and
-	// also the account this program runs as.
+	// The login account, which this program also runs as.
 	sandboxUser = "sandbox"
 )
 
@@ -135,6 +146,9 @@ ClientAliveInterval 60
 ClientAliveCountMax 3
 PrintMotd no
 
+# A session carrying a command reads no profile script.
+SetEnv PATH=%s
+
 # Every accepted key is logged with its fingerprint, which is the only record
 # this boot keeps of who came in and dies with it.
 LogLevel VERBOSE
@@ -149,6 +163,9 @@ type sandbox struct {
 	issuer string
 	permit *ecdsa.PublicKey
 	nonce  string
+
+	// The closure's top-level store path; hash-named, so the config pins it.
+	toolchain string
 
 	// fingerprint identifies the host key sshd will present, minted at boot and
 	// reported by /healthz. A client reads it over the attested channel before it
@@ -202,6 +219,10 @@ func run() error {
 		return fmt.Errorf("SANDBOX_PERMIT_KEY: %w", err)
 	}
 	box.permit = permit
+	box.toolchain = os.Getenv("SANDBOX_TOOLCHAIN")
+	if !strings.HasPrefix(box.toolchain, nixStorePrefix) {
+		return fmt.Errorf("SANDBOX_TOOLCHAIN is not a %s path", nixStorePrefix)
+	}
 
 	// Everything sshd needs except a key to accept. Failing here is a refusal to
 	// boot, which is the only place a broken SSH policy can still be refused:
@@ -317,6 +338,11 @@ func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusForbidden, failure{"workspace key refused"})
 		return
 	}
+	if err := os.Mkdir(home, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		log.Printf("workspace provisioning failed: %v", err)
+		reply(w, http.StatusInternalServerError, failure{"workspace could not be provisioned"})
+		return
+	}
 	if err := s.claim(line); err != nil {
 		log.Printf("enrollment refused: %v", err)
 		reply(w, http.StatusConflict, failure{"sandbox is already enrolled"})
@@ -373,38 +399,52 @@ func unlock(key []byte) error {
 	if err != nil {
 		return err
 	}
-	if status == responseRejected {
+	if status == statusRejected {
 		if status, err = control(opUnlock, key); err != nil {
 			return err
 		}
 	}
-	if status != responseOK {
-		return fmt.Errorf("volume worker answered %d", status)
+	if status != statusOK {
+		return fmt.Errorf("volume worker answered %q", status)
 	}
 	return nil
 }
 
-func control(operation byte, key []byte) (byte, error) {
+func control(operation string, key []byte) (string, error) {
+	// The key rides as base64 in this buffer, so it is cleared with the rest.
+	packet, err := json.Marshal(request{Op: operation, Key: key})
+	if err != nil {
+		return "", err
+	}
+	defer clear(packet)
 	connection, err := net.Dial("unixpacket", volumeControl)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 	defer connection.Close()
 	if err := connection.SetDeadline(time.Now().Add(volumeTimeout)); err != nil {
-		return 0, err
+		return "", err
 	}
-	var packet [volumeKeyBytes + 1]byte
-	defer clear(packet[:])
-	packet[0] = operation
-	copy(packet[1:], key)
-	if _, err := connection.Write(packet[:]); err != nil {
-		return 0, err
+	if _, err := connection.Write(packet); err != nil {
+		return "", err
 	}
-	var status [1]byte
-	if _, err := connection.Read(status[:]); err != nil {
-		return 0, err
+	var reply [maxStatusBytes]byte
+	n, err := connection.Read(reply[:])
+	if err != nil {
+		return "", err
 	}
-	return status[0], nil
+	var status struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(reply[:n], &status); err != nil {
+		return "", err
+	}
+	return status.Status, nil
+}
+
+type request struct {
+	Op  string `json:"op"`
+	Key []byte `json:"key"`
 }
 
 func device(path string) (uint64, error) {
@@ -424,9 +464,7 @@ func (s *sandbox) prepare() error {
 	if err := command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", hostKey); err != nil {
 		return fmt.Errorf("host key: %w", err)
 	}
-	policy := fmt.Sprintf(sshdPolicy, sshPort, hostKey, authorized, sandboxUser)
-	// Readable so sshd can read it after dropping to the login account, and
-	// writable by nobody: the directory is root-owned on a read-only rootfs.
+	policy := fmt.Sprintf(sshdPolicy, sshPort, hostKey, authorized, sandboxUser, s.toolchain+"/bin:"+imagePath)
 	if err := os.WriteFile(sshdConfig, []byte(policy), 0o444); err != nil {
 		return err
 	}

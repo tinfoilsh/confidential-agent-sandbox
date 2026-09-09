@@ -15,11 +15,21 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' -o /confidential
 # and the accounts declared below.
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 RUN apk add --no-cache openssh-server openssh-keygen \
-    # The login account owns nothing but its home, which is the workspace volume
-    # the measured config mounts at uid 1000. It is deliberately not the account
-    # the server runs as: a session cannot reach the sealed credential, the host
-    # key, or the process that wrote them.
- && adduser -D -H -u 1000 -h /workspace -s /bin/sh sandbox \
+    # The login account owns nothing but its home on the workspace volume.
+ && adduser -D -H -u 1000 -h /home/sandbox -s /bin/sh sandbox \
+    # Dangles until an enrollment unlocks the volume, which is before anything follows it.
+ && ln -s /workspace/home /home/sandbox \
+    # Must stay a real directory: nix refuses a store reached through a symlink.
+ && mkdir /nix \
+    # Nothing here can move to a flag: nix builds through a hook that re-reads only this file.
+ && mkdir -p /etc/nix \
+ && printf '%s\n' \
+    'experimental-features = nix-command flakes local-overlay-store read-only-local-store' \
+    'store = local-overlay://?root=/&lower-store=local%3Froot%3D%2Ftinfoil%2Fmodels%2Fnix%26read-only%3Dtrue&upper-layer=/nix/store.upper&check-mount=false' \
+    'build-users-group =' \
+    'sandbox = false' \
+    'substituters =' \
+    > /etc/nix/nix.conf \
     # sshd refuses a login for an account whose password field is locked, even
     # for publickey, so the field is set to a value no password can hash to
     # instead of the `!` adduser leaves. Password authentication is refused by
