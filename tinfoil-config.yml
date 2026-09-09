@@ -88,6 +88,6 @@ containers:
       # program.
       /run/sshd: rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=1000,gid=1000
       # Scratch for the shell's own tools, since the rootfs is read-only.
-      /tmp: rw,nosuid,nodev,size=16m,mode=1777
-    pids_limit: 128
+      /tmp: rw,nosuid,nodev,size=512m,mode=1777
+    pids_limit: 65536
     restart: always
