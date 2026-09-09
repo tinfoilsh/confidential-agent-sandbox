@@ -53,7 +53,7 @@ containers:
   - name: sandbox
     # The digest is what makes the code running here part of the measurement.
     # The image workflow fills in the ghcr.io digest of the built image.
-    image: "ghcr.io/tinfoilsh/confidential-agent-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    image: "ghcr.io/tinfoilsh/confidential-agent-sandbox@sha256:5b92facaa3c495fdd3109dc8a3977d8d70f79d909d2910a226598443b1cbd108" # v0.0.4
     networks: [egress]
     # The volume worker mounts, so the API, sshd and the shell are one unprivileged account.
     user: sandbox
