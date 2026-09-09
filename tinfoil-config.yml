@@ -59,12 +59,29 @@ containers:
     user: sandbox
     # Binds the pack read-only at /tinfoil/models/nix.
     models: [nix]
-    # Published as the CVM's port 22, which is the only forward path the measured
-    # firewall opens to this container. sshd inside it accepts publickey against
-    # the enrolled key and nothing else, and does not listen at all until one is
-    # enrolled -- but the service behind a published port is outside what the
-    # measurement can promise, so what stands there matters more than usual.
-    ports: ['22:2022']
+    # Every published port lands on the CVM's loopback and is reachable only
+    # through the shim's CONNECT tunnel, which this config leaves unkeyed: what a
+    # session binds on one of these answers to anyone who knows the domain. 22 is
+    # sshd, which accepts publickey against the enrolled key and nothing else, and
+    # does not listen at all until one is enrolled. The rest are what dev servers,
+    # desktops and databases bind by default; 8080 is taken by the API above.
+    ports:
+      - '22:2022'
+      - '3000:3000'
+      - '3001:3001'
+      - '4000:4000'
+      - '5000:5000'
+      - '5173:5173'
+      - '8000:8000'
+      - '8001:8001'
+      - '8888:8888'
+      - '9000:9000'
+      - '9222:9222'
+      - '3389:3389'
+      - '5900:5900'
+      - '3306:3306'
+      - '5432:5432'
+      - '6379:6379'
     env:
       # A bare name is resolved per launch from the unmeasured external config
       # tinfoild writes, which is how one measured image serves every sandbox:
