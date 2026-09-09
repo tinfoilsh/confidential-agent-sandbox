@@ -30,7 +30,7 @@ RUN apk add --no-cache openssh-server openssh-keygen \
     'flake-registry = /nix/var/nix/profiles/default/etc/nix/registry.json' \
     'build-users-group =' \
     'sandbox = false' \
-    'substituters =' \
+    'substituters = https://cache.nixos.org' \
     > /etc/nix/nix.conf \
     # Alpine's /etc/profile assigns PATH before it reads this directory, so the
     # toolchain is put back here. Both scripts ship in the pack: nix's own puts the
