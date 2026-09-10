@@ -73,6 +73,8 @@ const (
 	volumeSocket   = "control.sock"
 	volumeKeyBytes = 64
 	volumeTimeout  = 10 * time.Second
+	// A first unlock formats the volume, which takes minutes on a large one.
+	volumeFormatTimeout = 15 * time.Minute
 
 	sshdStartTimeout = 30 * time.Second
 	syncInterval     = 5 * time.Second
@@ -423,10 +425,13 @@ func control(operation string, key []byte) (string, error) {
 		return "", err
 	}
 	defer connection.Close()
-	if err := connection.SetDeadline(time.Now().Add(volumeTimeout)); err != nil {
+	if err := connection.SetWriteDeadline(time.Now().Add(volumeTimeout)); err != nil {
 		return "", err
 	}
 	if _, err := connection.Write(packet); err != nil {
+		return "", err
+	}
+	if err := connection.SetReadDeadline(time.Now().Add(volumeFormatTimeout)); err != nil {
 		return "", err
 	}
 	var reply [maxStatusBytes]byte
