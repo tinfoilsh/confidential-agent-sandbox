@@ -53,7 +53,7 @@ containers:
   - name: sandbox
     # The digest is what makes the code running here part of the measurement.
     # The image workflow fills in the ghcr.io digest of the built image.
-    image: "ghcr.io/tinfoilsh/confidential-agent-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    image: "ghcr.io/tinfoilsh/confidential-agent-sandbox@sha256:155164425d9aab4da8334c704c385cd11eff1ad626b3ca5cc21b20fa8dbd9a71" # v0.1.4
     networks: [egress]
     # Root inside the CVM: sshd runs privileged and drops to the login account itself.
     cvm_admin: true
