@@ -107,8 +107,10 @@ const (
 
 	certificateSuffix = "-cert-v01@openssh.com"
 
-	// The login account, which this program also runs as.
-	sandboxUser = "sandbox"
+	// The account an owner logs in as. The container is containers[].cvm_admin,
+	// so this program, sshd and the session it opens are all root: nothing here
+	// changes hands, and what sshd reads stays owned by whoever wrote it.
+	loginUser = "root"
 )
 
 // sshdPolicy is sshd's whole configuration: publickey against one sealed file,
@@ -129,7 +131,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 HostbasedAuthentication no
 PermitEmptyPasswords no
-PermitRootLogin no
+PermitRootLogin prohibit-password
 AllowUsers %s
 StrictModes yes
 
@@ -276,7 +278,7 @@ func (s *sandbox) health(w http.ResponseWriter, r *http.Request) {
 		"enrolled": enrolled,
 		"ssh": map[string]any{
 			"port":      sshPort,
-			"user":      sandboxUser,
+			"user":      loginUser,
 			"host-key":  s.fingerprint,
 			"listening": listening,
 		},
@@ -465,7 +467,7 @@ func (s *sandbox) prepare() error {
 	if err := command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", hostKey); err != nil {
 		return fmt.Errorf("host key: %w", err)
 	}
-	policy := fmt.Sprintf(sshdPolicy, sshPort, hostKey, authorized, sandboxUser, profile+"/bin:"+imagePath)
+	policy := fmt.Sprintf(sshdPolicy, sshPort, hostKey, authorized, loginUser, profile+"/bin:"+imagePath)
 	if err := os.WriteFile(sshdConfig, []byte(policy), 0o444); err != nil {
 		return err
 	}
@@ -522,7 +524,7 @@ func (s *sandbox) seal(line string) error {
 		// Nothing restarts it: the sealed key is spent.
 		log.Printf("sshd exited: %v", err)
 	}()
-	log.Printf("ssh sealed to the enrolled key, listening on port %d as %s", sshPort, sandboxUser)
+	log.Printf("ssh sealed to the enrolled key, listening on port %d as %s", sshPort, loginUser)
 	return nil
 }
 
