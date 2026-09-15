@@ -55,8 +55,8 @@ containers:
     # The image workflow fills in the ghcr.io digest of the built image.
     image: "ghcr.io/tinfoilsh/confidential-agent-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
     networks: [egress]
-    # The volume worker mounts, so the API, sshd and the shell are one unprivileged account.
-    user: sandbox
+    # Root inside the CVM: sshd runs privileged and drops to the login account itself.
+    cvm_admin: true
     # Binds the pack read-only at /tinfoil/models/nix.
     models: [nix]
     # Every published port lands on the CVM's loopback and is reachable only
