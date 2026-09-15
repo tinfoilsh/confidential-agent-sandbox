@@ -33,7 +33,7 @@ volumes:
   - name: workspace
     # Owned by the login account, which unlocks it and is handed the merged store.
     exec: true
-    owner: 1000
+    owner: 0
     # The worker stacks the nix pack's store under a writable dir on this volume,
     # so /nix/store is the attested toolchain until the session writes over it.
     overlays:
@@ -55,7 +55,7 @@ containers:
     # The image workflow fills in the ghcr.io digest of the built image.
     image: "ghcr.io/tinfoilsh/confidential-agent-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
     networks: [egress]
-    # Root inside the CVM: sshd runs privileged and drops to the login account itself.
+    # Root inside the CVM, which is also the account an owner logs in as.
     cvm_admin: true
     # Binds the pack read-only at /tinfoil/models/nix.
     models: [nix]
@@ -102,8 +102,9 @@ containers:
     tmpfs:
       # Everything sshd reads: the host key minted at boot, the rendered policy,
       # and the sealed authorized_keys. `noexec` because nothing here is ever a
-      # program.
-      /run/sshd: rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=1000,gid=1000
+      # program. Left root-owned, because sshd checks this directory against the
+      # account logging in and refuses a key file under one it does not own.
+      /run/sshd: rw,noexec,nosuid,nodev,size=1m,mode=0700
       # Scratch for the shell's own tools, since the rootfs is read-only.
       /tmp: rw,nosuid,nodev,size=512m,mode=1777
     pids_limit: 65536

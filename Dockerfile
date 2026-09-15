@@ -11,14 +11,15 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' -o /confidential
 # OpenSSH is a C program with a shell behind it, so the runtime is Alpine rather
 # than distroless. The Go half is still the only thing this repo authors; what
 # Alpine contributes is audited the way every other measured container is -- by
-# the image digest tinfoil-config pins, which covers this base, these packages,
-# and the accounts declared below.
+# the image digest tinfoil-config pins, which covers this base and these
+# packages.
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 RUN apk add --no-cache openssh-server openssh-keygen \
-    # The login account owns nothing but its home on the workspace volume.
- && adduser -D -H -u 1000 -h /home/sandbox -s /bin/sh sandbox \
-    # Dangles until an enrollment unlocks the volume, which is before anything follows it.
- && ln -s /workspace/home /home/sandbox \
+    # root logs in, so root's home is the workspace and a session's files are
+    # the volume's. Dangles until an enrollment unlocks the volume, which is
+    # before anything follows it.
+ && rm -rf /root \
+ && ln -s /workspace/home /root \
     # Must stay a real directory: nix refuses a store reached through a symlink.
  && mkdir /nix \
     # Nothing here can move to a flag: nix builds through a hook that re-reads only this file.
@@ -42,11 +43,6 @@ RUN apk add --no-cache openssh-server openssh-keygen \
     # Scripts hardcode both, and the pack is mounted at /nix, so they are the image's to provide.
  && ln -s /nix/var/nix/profiles/default/bin/bash /bin/bash \
  && ln -sf /nix/var/nix/profiles/default/bin/env /usr/bin/env \
-    # sshd refuses a login for an account whose password field is locked, even
-    # for publickey, so the field is set to a value no password can hash to
-    # instead of the `!` adduser leaves. Password authentication is refused by
-    # the policy in main.go regardless; this is what keeps publickey reachable.
- && sed -i 's|^sandbox:[^:]*:|sandbox:$6$sealed$sandbox:|' /etc/shadow \
     # No image ships a host key: main.go mints one per boot into a tmpfs, and
     # /etc/ssh/sshd_config is never read because sshd is started with -f.
  && rm -f /etc/ssh/sshd_config /etc/ssh/ssh_host_*
