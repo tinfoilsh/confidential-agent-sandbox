@@ -1,12 +1,9 @@
 # Measured workload definition: what tinfoild launches for one sandbox, and the
 # only thing a client attesting that sandbox is told it is running. Every byte
-# here is covered by the release measurement. The orchestrator allowed to enroll
-# this sandbox's owner is part of the image itself (tinfoil/cmd/sandbox in tinfoilsh/cvmimage-sandbox), as is
-# the list of loopback ports the shim tunnels to.
-cvm-version: 0.15.0
-cvm-source:
-  repo: tinfoilsh/cvmimage-sandbox
-  artifacts: https://images.tinfoil.sh/cvm-sandbox
+# here is covered by the release measurement, so the container is pinned by
+# digest and the orchestrator allowed to enroll this sandbox's owner is named in
+# the document rather than chosen at launch.
+cvm-version: 0.14.5
 
 cpus: 2
 memory: 2048
@@ -17,10 +14,10 @@ memory: 2048
 # stands between an owner and the enclave. /enroll is the single call
 # orchestrator's permit buys -- it names the key that owns this boot.
 #
-# Port 22 is the other door, and it is opened by the same key: the shell is
-# reachable only after /enroll has sealed that key into sshd's one
-# authorized_keys. The host key's fingerprint is reported by /healthz over this
-# attested channel, so a client never has to trust port 22 on first sight.
+# Port 22 below is the other door, and it is opened by the same key: the shell is
+# reachable only after /enroll has sealed that key into sshd's one authorized_keys.
+# The host key's fingerprint is reported by /healthz over this attested channel,
+# so a client never has to trust port 22 on first sight.
 shim:
   upstream-port: 8080
   authenticated: false
@@ -28,12 +25,17 @@ shim:
     - /enroll
     - /healthz
 
+networks:
+  egress:
+    egress: open
+
 volumes:
   - name: workspace
-    # The shell runs from it, and the merged nix store lives on it.
+    # Owned by the login account, which unlocks it and is handed the merged store.
     exec: true
-    # The nix pack's store is stacked under a writable dir on this volume, so
-    # /nix/store is the attested toolchain until the session writes over it.
+    owner: 1000
+    # The worker stacks the nix pack's store under a writable dir on this volume,
+    # so /nix/store is the attested toolchain until the session writes over it.
     overlays:
       - model: nix
         source: nix/store
@@ -46,3 +48,63 @@ models:
     exec: true
     repo: "nix/sandbox-toolchain@kzqj4szd3hirm5yik5rf2ww7szfq84c5"
     mwp: "9997bc8aaf52ef8bb53a61e1decbd89748f182f0b6c4bfa13c4a0db1f8298a66_17364475904_38b04538-4fe1-5437-a5f7-0740acc8d387"
+
+containers:
+  - name: sandbox
+    # The digest is what makes the code running here part of the measurement.
+    # The image workflow fills in the ghcr.io digest of the built image.
+    image: "ghcr.io/tinfoilsh/confidential-agent-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    networks: [egress]
+    # Root inside the CVM: sshd runs privileged and drops to the login account itself.
+    cvm_admin: true
+    # Binds the pack read-only at /tinfoil/models/nix.
+    models: [nix]
+    # Every published port lands on the CVM's loopback and is reachable only
+    # through the shim's CONNECT tunnel, which this config leaves unkeyed: what a
+    # session binds on one of these answers to anyone who knows the domain. 22 is
+    # sshd, which accepts publickey against the enrolled key and nothing else, and
+    # does not listen at all until one is enrolled. The rest are what dev servers,
+    # desktops and databases bind by default; 8080 is taken by the API above.
+    ports:
+      - '22:2022'
+      - '3000:3000'
+      - '3001:3001'
+      - '4000:4000'
+      - '5000:5000'
+      - '5173:5173'
+      - '8000:8000'
+      - '8001:8001'
+      - '8888:8888'
+      - '9000:9000'
+      - '9222:9222'
+      - '3389:3389'
+      - '5900:5900'
+      - '3306:3306'
+      - '5432:5432'
+      - '6379:6379'
+    env:
+      # A bare name is resolved per launch from the unmeasured external config
+      # tinfoild writes, which is how one measured image serves every sandbox:
+      # orchestrator assigns the domain, the measurement covers only that the
+      # permit's subject is checked against whatever it assigned.
+      - DOMAIN
+      # Mappings are measured values. Who may introduce this sandbox's owner is
+      # part of what a client attests, so both of these are pinned here and not
+      # injected. The key below spends itself on one enrollment: it names the
+      # first owner, and can neither name a second nor act as one.
+      - SANDBOX_PERMIT_ISSUER: https://orchestrator.tinfoil.sh
+      # base64 SPKI DER of the public half of the orchestrator's permit key:
+      #   openssl pkey -pubout -in permit.key.pem -outform DER | base64 -w0
+      - SANDBOX_PERMIT_KEY: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEe7Dz4UoNi9fKoAq9DMgv+moqp+dyZyVSeRlAiVlFqZNAMLaamYJotUmKSR7OAT7AND1fC47oDfzOOX9nOs72ew==
+    # Twice: the session's own filesystem, and /nix where the merged store lands.
+    volumes: [workspace:/workspace, workspace:/nix]
+    read_only: true
+    tmpfs:
+      # Everything sshd reads: the host key minted at boot, the rendered policy,
+      # and the sealed authorized_keys. `noexec` because nothing here is ever a
+      # program.
+      /run/sshd: rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=1000,gid=1000
+      # Scratch for the shell's own tools, since the rootfs is read-only.
+      /tmp: rw,nosuid,nodev,size=512m,mode=1777
+    pids_limit: 65536
+    restart: always
