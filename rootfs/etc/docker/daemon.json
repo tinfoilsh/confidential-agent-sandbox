@@ -1,0 +1,11 @@
+{
+  "hosts": ["unix:///var/run/docker.sock"],
+  "data-root": "/mnt/disk/docker",
+  "storage-driver": "overlay2",
+  "features": {"containerd-snapshotter": false},
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "firewall-backend": "nftables",
+  "ip6tables": false,
+  "shutdown-timeout": 60,
+  "log-driver": "local"
+}
