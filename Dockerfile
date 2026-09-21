@@ -39,6 +39,7 @@ RUN yes | DEBIAN_FRONTEND=noninteractive unminimize \
     && groupadd -f docker \
     && usermod -aG sudo,adm,systemd-journal,docker -s /bin/bash sandbox \
     && passwd -l sandbox \
+    && mkdir /workspace \
     && rm -f /usr/sbin/policy-rc.d \
     && rm -f /etc/ssh/ssh_host_* \
     && rm -rf /var/lib/apt/lists/*
@@ -56,7 +57,7 @@ COPY --chmod=0755 entrypoint.sh /entrypoint
 COPY rootfs/ /
 COPY --from=build /workspace-enroll /usr/local/libexec/workspace-enroll
 RUN chmod 0440 /etc/sudoers.d/90-sandbox \
-    && for script in /entrypoint /usr/local/libexec/workspace-init /healthcheck.sh; do \
+    && for script in /entrypoint /healthcheck.sh; do \
          bash -n "$script" || exit 1; \
        done
 

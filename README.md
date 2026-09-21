@@ -12,4 +12,6 @@ tinfoil sandbox ssh workspace
 
 The first connection puts the keys to the sandbox in `~/.tinfoil/sandboxes/<name>`, and seals the disk with them.
 
-Apt packages, home directories, `/workspace`, and Docker state stay on the disk.
+Home directories, `/workspace`, Docker state, and installed packages stay on the
+disk. Packages are kept per image build, so an updated image starts without them.
+Everything else is reset when the sandbox is recreated.
