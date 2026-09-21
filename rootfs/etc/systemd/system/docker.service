@@ -1,0 +1,21 @@
+[Unit]
+Description=Docker Application Container Engine
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/dockerd
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=120s
+TimeoutStopSec=90s
+Delegate=yes
+KillMode=process
+TasksMax=infinity
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+
+[Install]
+WantedBy=multi-user.target
