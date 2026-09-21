@@ -5,6 +5,8 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=notify
+# Docker's nftables backend needs forwarding in each new network namespace.
+ExecStartPre=/usr/sbin/sysctl -q -w net.ipv4.ip_forward=1
 ExecStart=/usr/local/bin/dockerd
 Restart=on-failure
 RestartSec=5s
