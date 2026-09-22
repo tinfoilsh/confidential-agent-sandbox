@@ -15,6 +15,18 @@ volumes:
   - name: workspace
     # Persistent encrypted disk, opened by the volume key an enrollment spends.
     exec: true
+    # The pack is read-only, so a writable store is the volume layered over it.
+    overlays:
+      - model: nix
+        source: nix/store
+        target: store
+
+models:
+  - name: nix
+    # The pack holds programs, not weights.
+    exec: true
+    repo: "nix/sandbox-toolchain@kzqj4szd3hirm5yik5rf2ww7szfq84c5"
+    mwp: "9997bc8aaf52ef8bb53a61e1decbd89748f182f0b6c4bfa13c4a0db1f8298a66_17364475904_38b04538-4fe1-5437-a5f7-0740acc8d387"
 
 containers:
   - name: "workspace"
@@ -26,7 +38,8 @@ containers:
     stop_signal: SIGRTMIN+3
     stop_timeout: 120
     networks: [dev]
-    volumes: [workspace:/mnt/disk]
+    models: [nix]
+    volumes: [workspace:/mnt/disk, workspace:/nix]
 
     # Every published port lands on the CVM's loopback and is reachable only
     # through the shim's CONNECT tunnel, which this config leaves unkeyed: what a
