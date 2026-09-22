@@ -41,6 +41,22 @@ RUN yes | DEBIAN_FRONTEND=noninteractive unminimize \
     && passwd -l sandbox \
     && mkdir /workspace \
     && rm -f /usr/sbin/policy-rc.d \
+    # Must stay a real directory: nix refuses a store reached through a symlink.
+    && mkdir /nix \
+    # Nothing here can move to a flag: nix builds through a hook that re-reads only this file.
+    && mkdir -p /etc/nix \
+    && printf '%s\n' \
+      'experimental-features = nix-command flakes local-overlay-store read-only-local-store' \
+      'store = local-overlay://?root=/&lower-store=local%3Froot%3D%2Ftinfoil%2Fmodels%2Fnix%26read-only%3Dtrue&upper-layer=/nix/store.upper&check-mount=false' \
+      'flake-registry = /nix/var/nix/profiles/default/etc/nix/registry.json' \
+      'build-users-group =' \
+      'sandbox = false' \
+      'substituters = https://cache.nixos.org' \
+      > /etc/nix/nix.conf \
+    && printf '%s\n' \
+      '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' \
+      '. /nix/var/nix/profiles/default/etc/profile.d/50-sandbox.sh' \
+      > /etc/profile.d/nix.sh \
     && rm -f /etc/ssh/ssh_host_* \
     && rm -rf /var/lib/apt/lists/*
 
