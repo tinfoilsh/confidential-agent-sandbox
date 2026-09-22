@@ -12,7 +12,7 @@ ssh-keygen -q -t ed25519 -N '' -C '' -f "$credentials/host_key"
 # sshd opens the enrolled key as the login user.
 install -m 0644 "$disk/.authorized_keys" "$credentials/authorized_keys"
 # The pack names its closure without the hash here, which is what nix.conf reads.
-install -d /nix/var/nix/profiles
+install -d /nix/var/nix/profiles /nix/var/nix/daemon-socket
 ln -sfn /tinfoil/models/nix/nix/var/nix/profiles/default /nix/var/nix/profiles/default
 [[ -s $disk/machine-id ]] || systemd-id128 new > "$disk/machine-id"
 [[ -d $disk/home ]] || cp -a /home "$disk/home"
