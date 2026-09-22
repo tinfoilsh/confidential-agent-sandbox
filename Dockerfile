@@ -56,6 +56,7 @@ RUN yes | DEBIAN_FRONTEND=noninteractive unminimize \
     && printf '%s\n' \
       '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' \
       '. /nix/var/nix/profiles/default/etc/profile.d/50-sandbox.sh' \
+      '[ "$(id -u)" = 0 ] || export NIX_CONFIG="store = daemon"' \
       > /etc/profile.d/nix.sh \
     && rm -f /etc/ssh/ssh_host_* \
     && rm -rf /var/lib/apt/lists/*
@@ -79,6 +80,11 @@ RUN chmod 0440 /etc/sudoers.d/90-sandbox \
 
 RUN systemctl disable ssh.socket \
     && systemctl enable ssh.service docker.service cron.service \
+    # The units resolve once the entrypoint links the pack's profile, so systemctl cannot enable them here.
+    && ln -s /nix/var/nix/profiles/default/lib/systemd/system/nix-daemon.service \
+         /nix/var/nix/profiles/default/lib/systemd/system/nix-daemon.socket /etc/systemd/system/ \
+    && mkdir -p /etc/systemd/system/sockets.target.wants \
+    && ln -s /etc/systemd/system/nix-daemon.socket /etc/systemd/system/sockets.target.wants/ \
     && systemctl mask systemd-udevd.service systemd-udevd-control.socket systemd-udevd-kernel.socket \
          systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service \
          systemd-resolved.service systemd-timesyncd.service console-getty.service \
