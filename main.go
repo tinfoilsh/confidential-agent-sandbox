@@ -41,6 +41,8 @@ const (
 	volumeControl  = "/run/tinfoil/volumes/workspace/control.sock"
 	volumeKeyBytes = 64
 	volumeTimeout  = 10 * time.Second
+	// A first unlock formats the volume, which takes minutes on a large one.
+	volumeFormatTimeout = 15 * time.Minute
 
 	opUnlock     = "unlock"
 	opInitialize = "initialize"
@@ -270,6 +272,9 @@ func control(operation string, key []byte) (string, error) {
 		return "", err
 	}
 	if _, err := connection.Write(packet); err != nil {
+		return "", err
+	}
+	if err := connection.SetReadDeadline(time.Now().Add(volumeFormatTimeout)); err != nil {
 		return "", err
 	}
 	var reply [maxStatusBytes]byte
