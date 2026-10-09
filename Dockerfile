@@ -74,9 +74,12 @@ COPY --chmod=0755 entrypoint.sh /entrypoint
 COPY rootfs/ /
 COPY --from=build /workspace-enroll /usr/local/libexec/workspace-enroll
 RUN chmod 0440 /etc/sudoers.d/90-sandbox \
-    && for script in /entrypoint /healthcheck.sh; do \
+    && chmod 0755 /usr/local/bin/monitor /usr/local/libexec/seed-agent-skills \
+    && for script in /entrypoint /healthcheck.sh /usr/local/libexec/seed-agent-skills; do \
          bash -n "$script" || exit 1; \
-       done
+       done \
+    && /usr/local/bin/monitor run --help > /dev/null \
+    && /usr/local/bin/monitor mcp serve --help > /dev/null
 
 RUN systemctl disable ssh.socket \
     && systemctl enable ssh.service docker.service cron.service \

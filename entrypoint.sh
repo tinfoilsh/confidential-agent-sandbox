@@ -33,6 +33,9 @@ done
 mount --bind "$disk/machine-id" /etc/machine-id
 mount --bind "$disk/home" /home
 mount --bind "$disk/workspace" /workspace
+# Seed after mounting home so existing disks discover the image's agent tools too.
+runuser -u sandbox -- /usr/local/libexec/seed-agent-skills /home/sandbox
+/usr/local/libexec/seed-agent-skills /root
 # Leave device management with the CVM, while its cgroup submount stays writable.
 mount -o remount,bind,ro /sys
 exec /sbin/init

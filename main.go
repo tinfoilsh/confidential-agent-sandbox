@@ -42,8 +42,9 @@ const (
 	volumeKeyBytes = 64
 	volumeTimeout  = 10 * time.Second
 
-	opUnlock     = "unlock"
-	opInitialize = "initialize"
+	volumeFormat byte = 2 // Argon2id
+	opUnlock     byte = 'u'
+	opInitialize byte = 'i'
 
 	statusOK       = "ok"
 	statusRejected = "rejected"
@@ -255,11 +256,8 @@ func unlock(key []byte) error {
 }
 
 // No read deadline: a first unlock formats the volume, which takes minutes on a large disk.
-func control(operation string, key []byte) (string, error) {
-	packet, err := json.Marshal(request{Op: operation, Key: key})
-	if err != nil {
-		return "", err
-	}
+func control(operation byte, key []byte) (string, error) {
+	packet := append([]byte{volumeFormat, operation}, key...)
 	defer clear(packet)
 	connection, err := net.Dial("unixpacket", volumeControl)
 	if err != nil {
@@ -277,18 +275,7 @@ func control(operation string, key []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var status struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(reply[:n], &status); err != nil {
-		return "", err
-	}
-	return status.Status, nil
-}
-
-type request struct {
-	Op  string `json:"op"`
-	Key []byte `json:"key"`
+	return string(reply[:n]), nil
 }
 
 func device(path string) (uint64, error) {

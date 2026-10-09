@@ -1,6 +1,6 @@
 # An Ubuntu workspace with measured CVM-wide administrator access. Connect with
 # `tinfoil sandbox ssh`, which tunnels over the shim's attested TLS.
-cvm-version: 0.14.8
+cvm-version: 0.15.1-rc.1@sha256:c342320e0570cda72f1bf3475211c13bd28803e87ef5e1aea5e5b85c2862b113
 # cpus: 32
 # memory: 524288
 # gpus: 8
@@ -39,7 +39,7 @@ containers:
     stop_timeout: 120
     networks: [dev]
     models: [nix]
-    volumes: [workspace:/mnt/disk, workspace:/nix]
+    persistent_volumes: [workspace:/mnt/disk, workspace:/nix]
 
     # Every published port lands on the CVM's loopback and is reachable only
     # through the shim's CONNECT tunnel, which this config leaves unkeyed: what a
