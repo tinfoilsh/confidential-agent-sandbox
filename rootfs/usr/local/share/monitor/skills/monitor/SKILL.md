@@ -8,7 +8,11 @@ description: Discover accounts available through Monitor, run HTTP clients with 
 Run `monitor connections --json` to discover accounts granted to this sandbox,
 their connection names, and their current status.
 
-Run HTTP clients through Monitor:
+HTTP and HTTPS traffic already goes through Monitor system-wide. Its CA is in the
+system trust store. Direct internet egress is closed; the owner must keep the
+Monitor reverse forward connected.
+
+Use the wrapper when you need credential placeholders or account selection:
 
 ```sh
 monitor run -- curl -fsS https://example.com
@@ -18,7 +22,7 @@ monitor shell
 Use destinations allowed by the discovered accounts. Select an account with
 `monitor run --connection NAME -- COMMAND`. The wrapper sets proxy and certificate
 settings and supplies credential placeholders. Monitor substitutes real credentials
-upstream. Tools must honor those proxy settings.
+upstream. Transparent routing also covers tools that ignore proxy settings.
 
 Shared credential names have separate variables such as
 `MONITOR_CREDENTIAL_ANTHROPIC_TOKEN`. When a tool expects a different variable,

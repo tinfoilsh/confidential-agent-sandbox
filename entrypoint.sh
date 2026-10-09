@@ -36,6 +36,8 @@ mount --bind "$disk/workspace" /workspace
 # Seed after mounting home so existing disks discover the image's agent tools too.
 runuser -u sandbox -- /usr/local/libexec/seed-agent-skills /home/sandbox
 /usr/local/libexec/seed-agent-skills /root
+# Keep DNS inside Monitor's TUN, including while its SSH connection is down.
+printf 'nameserver 100.127.255.2\noptions timeout:1 attempts:2\n' > /etc/resolv.conf
 # Leave device management with the CVM, while its cgroup submount stays writable.
 mount -o remount,bind,ro /sys
 exec /sbin/init

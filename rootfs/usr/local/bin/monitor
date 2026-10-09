@@ -724,6 +724,52 @@ def load_profile(args):
         args.connection = args.connection or connections
 
 
+def network_config(socks_port):
+    # FakeIP keeps the hostname intact through the TUN and SSH SOCKS hop.
+    # No upstream DNS or direct outbound exists in this configuration.
+    return {
+        "log": {"level": "warn"},
+        "dns": {
+            "servers": [{"type": "hosts", "tag": "hosts"},
+                        {"type": "fakeip", "tag": "fakeip", "inet4_range": "198.18.0.0/15"}],
+            "rules": [{"query_type": ["A"], "server": "fakeip"},
+                      {"action": "predefined", "rcode": "NOERROR"}],
+        },
+        "inbounds": [{"type": "tun", "interface_name": "monitor0",
+                      "address": ["100.127.255.1/30", "fdfe:dcba:9876::1/126"],
+                      "auto_route": True}],
+        "outbounds": [{"type": "socks", "tag": "monitor", "server": "127.0.0.1",
+                       "server_port": socks_port, "network": "tcp"}],
+        "route": {
+            "rules": [{"action": "sniff"}, {"protocol": "dns", "action": "hijack-dns"},
+                      {"network": "udp", "action": "reject"}],
+            "final": "monitor",
+        },
+    }
+
+
+def network_command(client):
+    if os.geteuid() != 0:
+        raise MonitorError("system-wide routing requires root; use systemctl start monitor-network")
+    with Session(client) as session:
+        setup = json.loads(client.request("agent.monitor", "GET", "/connections"))
+        ca = setup["ca"]
+        if not isinstance(ca, str) or not ca:
+            raise MonitorError("Monitor did not supply a CA")
+        ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=ca)
+        certificate = Path("/usr/local/share/ca-certificates/monitor.crt")
+        if not certificate.exists() or certificate.read_text() != ca:
+            temporary = certificate.with_suffix(".tmp")
+            temporary.write_text(ca)
+            temporary.chmod(0o644)
+            temporary.replace(certificate)
+        subprocess.run(["update-ca-certificates", "--fresh"], check=True)
+        config = session.directory / "sing-box.json"
+        config.write_text(json.dumps(network_config(session.socks_port)))
+        # run_child tears down the TUN on tunnel loss. CVM egress stays closed.
+        return run_child(session, ["/usr/local/bin/sing-box", "run", "-c", str(config)], os.environ.copy())
+
+
 
 def parser():
     p = argparse.ArgumentParser(
@@ -748,6 +794,7 @@ def parser():
     serve.add_argument("--listen", default="127.0.0.1:8400", help="loopback IP:port; port 0 selects a free port")
     connections = commands.add_parser("connections", help="list reachable connections and their current status")
     connections.add_argument("--json", action="store_true", help="include account, host and access settings as JSON")
+    commands.add_parser("network", help="run the system-wide SSH/TUN service (root only)")
     return p
 
 
@@ -764,13 +811,15 @@ def main(argv=None):
         if args.ssh_config:
             args.ssh_config = os.path.abspath(os.path.expanduser(args.ssh_config))
         client = Client(args.ssh_host, args.ssh_config, args.timeout)
-        if args.command in ("run", "shell", "mcp"):
+        if args.command in ("run", "shell", "mcp", "network"):
             if sys.version_info < (3, 11):
-                raise MonitorError("run, shell and mcp serve require Python 3.11 or newer")
+                raise MonitorError("this command requires Python 3.11 or newer")
             def interrupted(signum, frame):
                 raise Interrupted(signum)
             for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
                 previous[signum] = signal.signal(signum, interrupted)
+            if args.command == "network":
+                return network_command(client)
             return managed_command(client, args)
         connections = client.connections()
         if args.json:
@@ -785,7 +834,7 @@ def main(argv=None):
         else:
             print("No connections are available to this agent. Ask the owner to grant access.")
         return 0
-    except (MonitorError, OSError, http.client.HTTPException, subprocess.TimeoutExpired, ValueError, KeyError, EOFError) as error:
+    except (MonitorError, OSError, http.client.HTTPException, subprocess.SubprocessError, ValueError, KeyError, EOFError) as error:
         print(f"monitor: {error}", file=sys.stderr)
         return 1
     except Interrupted as error:

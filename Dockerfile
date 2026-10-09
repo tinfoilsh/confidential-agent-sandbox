@@ -17,6 +17,8 @@ ARG DOCKER_VERSION=29.6.2
 ARG DOCKER_SHA256=d6204aea92238e2453d5445c885b9d2e5eb8f82915568ec50edf9dbe12a3ac74
 ARG BUILDX_VERSION=0.37.1
 ARG BUILDX_SHA256=9447199cdb435f25880548343c128a4b6650e8891ee598905d8d29d39a8e359b
+ARG SING_BOX_VERSION=1.14.3
+ARG SING_BOX_SHA256=e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee
 
 RUN yes | DEBIAN_FRONTEND=noninteractive unminimize \
     && rm -f /etc/dpkg/dpkg.cfg.d/docker-apt-speedup \
@@ -70,19 +72,27 @@ RUN curl -fsSL --retry 3 "https://download.docker.com/linux/static/stable/x86_64
     && echo "${BUILDX_SHA256}  /usr/local/lib/docker/cli-plugins/docker-buildx" | sha256sum -c - \
     && chmod 0755 /usr/local/lib/docker/cli-plugins/docker-buildx
 
+RUN curl -fsSL --retry 3 "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-linux-amd64.tar.gz" -o /tmp/sing-box.tar.gz \
+    && echo "${SING_BOX_SHA256}  /tmp/sing-box.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/sing-box.tar.gz --strip-components=1 -C /usr/local/bin "sing-box-${SING_BOX_VERSION}-linux-amd64/sing-box" \
+    && mkdir -p /usr/local/share/licenses/sing-box \
+    && tar -xOzf /tmp/sing-box.tar.gz "sing-box-${SING_BOX_VERSION}-linux-amd64/LICENSE" > /usr/local/share/licenses/sing-box/LICENSE \
+    && rm /tmp/sing-box.tar.gz
+
 COPY --chmod=0755 entrypoint.sh /entrypoint
 COPY rootfs/ /
 COPY --from=build /workspace-enroll /usr/local/libexec/workspace-enroll
 RUN chmod 0440 /etc/sudoers.d/90-sandbox \
     && chmod 0755 /usr/local/bin/monitor /usr/local/libexec/seed-agent-skills \
-    && for script in /entrypoint /healthcheck.sh /usr/local/libexec/seed-agent-skills; do \
+    && for script in /entrypoint /healthcheck.sh /usr/local/libexec/seed-agent-skills /etc/profile.d/zz-monitor.sh; do \
          bash -n "$script" || exit 1; \
        done \
     && /usr/local/bin/monitor run --help > /dev/null \
-    && /usr/local/bin/monitor mcp serve --help > /dev/null
+    && /usr/local/bin/monitor mcp serve --help > /dev/null \
+    && /usr/local/bin/monitor network --help > /dev/null
 
 RUN systemctl disable ssh.socket \
-    && systemctl enable ssh.service docker.service cron.service \
+    && systemctl enable ssh.service docker.service cron.service monitor-network.service \
     # The units resolve once the entrypoint links the pack's profile, so systemctl cannot enable them here.
     && ln -s /nix/var/nix/profiles/default/lib/systemd/system/nix-daemon.service \
          /nix/var/nix/profiles/default/lib/systemd/system/nix-daemon.socket /etc/systemd/system/ \

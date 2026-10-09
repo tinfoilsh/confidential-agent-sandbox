@@ -1,0 +1,13 @@
+[Unit]
+Description=Monitor SSH tunnel and transparent routing
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/local/bin/monitor network
+Restart=always
+RestartSec=5s
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=multi-user.target
