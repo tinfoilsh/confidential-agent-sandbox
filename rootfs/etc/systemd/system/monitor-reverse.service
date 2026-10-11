@@ -1,0 +1,15 @@
+[Unit]
+Description=Owner access through Monitor
+Requires=monitor-configure.service
+After=network.target monitor-configure.service
+StartLimitIntervalSec=0
+ConditionPathExists=/run/monitor/route.json
+
+[Service]
+ExecStart=/usr/bin/ssh -NT -F /etc/ssh/monitor-reverse.conf monitor
+Restart=always
+RestartSec=2s
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=multi-user.target

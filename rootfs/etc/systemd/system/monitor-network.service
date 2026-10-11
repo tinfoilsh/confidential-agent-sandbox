@@ -1,10 +1,15 @@
 [Unit]
 Description=Monitor SSH tunnel and transparent routing
-After=network.target
+Requires=monitor-configure.service
+After=network.target monitor-configure.service
 StartLimitIntervalSec=0
+# An uncontained sandbox enrolls without a Monitor and keeps the container's DNS.
+ConditionPathExists=/run/monitor/route.json
 
 [Service]
-ExecStart=/usr/local/bin/monitor network
+# Root's SSH client requires a private copy of the identity shared with sandbox.
+LoadCredential=identity:/run/monitor/identity
+ExecStart=/usr/local/bin/monitor --ssh-config /etc/ssh/monitor-network.conf network
 Restart=always
 RestartSec=5s
 TimeoutStopSec=10s

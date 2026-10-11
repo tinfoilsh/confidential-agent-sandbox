@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Write this boot's Monitor files in the directory managed by systemd."""
+
+import ipaddress
+import json
+import os
+from pathlib import Path
+import sys
+
+
+def configure(source, directory):
+    route = json.loads(source.read_text())
+    # Enrollment explicitly supplies null when no Monitor is assigned.
+    if route is None:
+        return
+    if not isinstance(route, dict):
+        raise ValueError("invalid Monitor enrollment")
+    if any(not isinstance(route.get(key), str) for key in ("domain", "ip", "host_key", "identity")):
+        raise ValueError("missing Monitor enrollment fields")
+    ip = ipaddress.ip_address(route["ip"])
+    if isinstance(ip, ipaddress.IPv6Address):
+        ip = ip.ipv4_mapped
+    if (ip is None or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified
+            or int(ip) == 0xffffffff or type(route.get("port")) is not int or not 1 <= route["port"] <= 65535
+            or not route["domain"] or any(c in route["domain"] for c in "/:@ \r\n")
+            or not route["host_key"].startswith(("ssh-", "ecdsa-"))
+            or any(c in route["host_key"] for c in "\r\n") or "PRIVATE KEY" not in route["identity"]):
+        raise ValueError("invalid Monitor SSH route")
+    # The service's Group and UMask make these root-owned and readable by sandbox.
+    (directory / "identity").write_text(route.pop("identity"))
+    (directory / "known_hosts").write_text("monitor " + route["host_key"] + "\n")
+    (directory / "endpoint.conf").write_text(f"HostName {ip}\nPort {route['port']}\n")
+    route["ip"] = str(ip)
+    (directory / "route.json").write_text(json.dumps(route))
+
+
+if __name__ == "__main__":
+    try:
+        configure(Path(sys.argv[1]), Path(os.environ["RUNTIME_DIRECTORY"]))
+    except (OSError, ValueError, KeyError) as error:
+        sys.exit(f"monitor-configure: {error}")
