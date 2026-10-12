@@ -8,7 +8,6 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,8 +29,7 @@ const (
 
 	hostKey = "/run/workspace/host_key"
 
-	volumeKeyBytes = 64
-	volumeTimeout  = 10 * time.Second
+	volumeTimeout = 10 * time.Second
 
 	volumeFormat byte = 2 // Argon2id
 	opUnlock     byte = 'u'
@@ -67,9 +65,9 @@ func (c monitorRoute) valid() bool {
 }
 
 type sandbox struct {
-	domain    string
-	ownerHash []byte
-	sshKey    string
+	domain string
+	owner  *ownerCommitment
+	sshKey string
 
 	done context.CancelFunc
 
@@ -91,11 +89,11 @@ func run() error {
 	if box.domain == "" {
 		return errors.New("DOMAIN is not set")
 	}
-	ownerHash, err := hex.DecodeString(os.Getenv("SANDBOX_OWNER_KEY_SHA256"))
-	if err != nil || len(ownerHash) != sha256.Size {
-		return errors.New("SANDBOX_OWNER_KEY_SHA256 must be a SHA-256 digest in hex")
+	owner, err := parseOwnerCommitment(os.Getenv("SANDBOX_OWNER_KEY_SHA256"), os.Getenv("SANDBOX_OWNER_KEY_ARGON2ID"))
+	if err != nil {
+		return err
 	}
-	box.ownerHash = ownerHash
+	box.owner = owner
 	keyData, err := os.ReadFile(hostKey + ".pub")
 	if err != nil {
 		return err
@@ -157,12 +155,14 @@ func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
 	volumeKey, err := workspaceKey(body.Volume)
 	if err != nil {
 		log.Printf("enrollment refused: %v", err)
-		reply(w, http.StatusBadRequest, failure{"volume is not base64 for a 64-byte workspace key"})
+		reply(w, http.StatusBadRequest, failure{"volume must encode a workspace key of 16 to 4096 bytes"})
 		return
 	}
 	defer clear(volumeKey)
-	ownerHash := sha256.Sum256(volumeKey)
-	if subtle.ConstantTimeCompare(s.ownerHash, ownerHash[:]) != 1 {
+	// Serialize owner verification before its memory-hard KDF and all disk changes.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.owner.matches(volumeKey) {
 		reply(w, http.StatusForbidden, failure{"owner key refused"})
 		return
 	}
@@ -172,8 +172,6 @@ func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusBadRequest, failure{"key is not one SSH public key"})
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	enrollment := s.receipt(line, volumeKey, body.Monitor)
 	if s.enrolled {
 		sealed, err := os.ReadFile(filepath.Join(disk, ".enrollment"))
@@ -211,7 +209,7 @@ func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
 }
 
 // receipt digests every enrollment value, so after a lost response only an identical
-// retry is acknowledged. The workspace key is random, so its digest reveals nothing.
+// retry is acknowledged. The receipt stays inside the encrypted workspace.
 // The first line names this boot's key, since the disk outlives the boot.
 func (s *sandbox) receipt(line string, volumeKey []byte, route *monitorRoute) []byte {
 	data, _ := json.Marshal(struct {
@@ -234,9 +232,10 @@ func workspaceKey(encoded string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(key) != volumeKeyBytes {
+	if len(key) < minVolumeKeyBytes || len(key) > maxVolumeKeyBytes {
+		size := len(key)
 		clear(key)
-		return nil, fmt.Errorf("workspace key is %d bytes, want %d", len(key), volumeKeyBytes)
+		return nil, fmt.Errorf("workspace key is %d bytes, want %d to %d", size, minVolumeKeyBytes, maxVolumeKeyBytes)
 	}
 	return key, nil
 }

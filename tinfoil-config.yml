@@ -58,7 +58,9 @@ containers:
     env:
       # Per launch, from the unmeasured external config tinfoild writes.
       - DOMAIN
-      # Provisioning binds the SHA-256 of the owner's decoded workspace key.
+      # New launches bind a salted Argon2id owner commitment. SHA-256 is for
+      # existing generated credentials. Exactly one binding must be supplied.
+      - SANDBOX_OWNER_KEY_ARGON2ID
       - SANDBOX_OWNER_KEY_SHA256
 
     tmpfs:
