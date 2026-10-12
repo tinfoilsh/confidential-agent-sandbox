@@ -41,7 +41,7 @@ func testSandbox(t *testing.T) (*sandbox, []byte, func(path string, body any) in
 		t.Fatal(err)
 	}
 	ownerHash := sha256.Sum256(volume)
-	box := &sandbox{domain: "work.example", ownerHash: ownerHash[:], sshKey: "ecdsa-sha2-nistp256 BOOT", done: func() {}}
+	box := &sandbox{domain: "work.example", owner: &ownerCommitment{hash: ownerHash[:]}, sshKey: "ecdsa-sha2-nistp256 BOOT", done: func() {}}
 	return box, volume, func(path string, body any) int {
 		data, _ := json.Marshal(body)
 		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(data))
@@ -51,7 +51,7 @@ func testSandbox(t *testing.T) (*sandbox, []byte, func(path string, body any) in
 	}
 }
 
-func testVolume(t *testing.T) (unlocked string) {
+func testVolume(t *testing.T, expected ...[]byte) (unlocked string) {
 	t.Helper()
 	unlocked, err := os.MkdirTemp("/dev/shm", "volume-")
 	if err != nil {
@@ -79,8 +79,13 @@ func testVolume(t *testing.T) (unlocked string) {
 			return
 		}
 		defer connection.Close()
-		packet := make([]byte, 2+volumeKeyBytes+1)
-		if n, _ := connection.Read(packet); n != 2+volumeKeyBytes || packet[0] != volumeFormat || packet[1] != opInitialize {
+		packet := make([]byte, 2+maxVolumeKeyBytes+1)
+		n, _ := connection.Read(packet)
+		valid := n == 2+volumeKeyBytes
+		if len(expected) > 0 {
+			valid = n == 2+len(expected[0]) && bytes.Equal(packet[2:n], expected[0])
+		}
+		if !valid || packet[0] != volumeFormat || packet[1] != opInitialize {
 			connection.Write([]byte(statusRejected))
 			return
 		}
@@ -210,14 +215,15 @@ func TestUncontainedEnrollmentHasNoMonitor(t *testing.T) {
 
 func TestEnrollmentRequiresBootOwnerConfiguration(t *testing.T) {
 	t.Setenv("DOMAIN", "work.example")
-	for _, value := range []string{"", "not-hex", "aa"} {
+	t.Setenv("SANDBOX_OWNER_KEY_ARGON2ID", "")
+	for _, value := range []string{"not-hex", "aa"} {
 		t.Setenv("SANDBOX_OWNER_KEY_SHA256", value)
 		if err := run(); err == nil || err.Error() != "SANDBOX_OWNER_KEY_SHA256 must be a SHA-256 digest in hex" {
 			t.Fatalf("invalid owner config %q: %v", value, err)
 		}
 	}
 	box, volume, call := testSandbox(t)
-	box.ownerHash = nil
+	box.owner = nil
 	if code := call("/enroll", map[string]string{"volume": base64.StdEncoding.EncodeToString(volume)}); code != http.StatusForbidden {
 		t.Fatalf("missing boot owner accepted enrollment: %d", code)
 	}
