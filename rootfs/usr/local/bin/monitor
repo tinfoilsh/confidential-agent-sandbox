@@ -727,6 +727,7 @@ def load_profile(args):
 def network_config(socks_port, monitor_ip):
     # FakeIP keeps the hostname intact through the TUN and SSH SOCKS hop.
     # No upstream DNS or direct outbound exists in this configuration.
+    # The CVM lacks IPv6 policy routing; FakeIP only answers A queries.
     return {
         "log": {"level": "warn"},
         "dns": {
@@ -736,7 +737,7 @@ def network_config(socks_port, monitor_ip):
                       {"action": "predefined", "rcode": "NOERROR"}],
         },
         "inbounds": [{"type": "tun", "interface_name": "monitor0",
-                      "address": ["100.127.255.1/30", "fdfe:dcba:9876::1/126"],
+                      "address": ["100.127.255.1/30"],
                       "auto_route": True, "route_exclude_address": [monitor_ip + "/32", "172.31.255.0/30"]}],
         "outbounds": [{"type": "socks", "tag": "monitor", "server": "127.0.0.1",
                        "server_port": socks_port, "network": "tcp"}],
