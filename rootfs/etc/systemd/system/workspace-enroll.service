@@ -1,0 +1,14 @@
+[Unit]
+Description=Sandbox boot registration
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/local/libexec/workspace-enroll
+# Also after a restart inside the CVM, when no early enrollment process ran.
+PassEnvironment=DOMAIN SANDBOX_OWNER_KEY_SHA256
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

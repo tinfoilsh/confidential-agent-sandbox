@@ -1,0 +1,11 @@
+[Unit]
+Description=Configure Monitor from owner enrollment
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Group=sandbox
+RuntimeDirectory=monitor
+RuntimeDirectoryMode=0750
+UMask=0027
+ExecStart=/usr/local/libexec/monitor-configure /run/workspace/monitor.json

@@ -1,27 +1,24 @@
-// Command workspace-enroll serves the permit-gated enrollment API until the
-// volume is open.
+// Command workspace-enroll authenticates the boot-bound owner and opens the volume.
 package main
 
 import (
+	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"slices"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,49 +26,56 @@ import (
 )
 
 const (
-	listen = ":8080"
-
-	disk = "/mnt/disk"
-
-	// Left on the disk the enrollment opened, so a restart inside a live CVM stages it without a second enrollment.
-	authorized = disk + "/.authorized_keys"
+	listen = ":8080" // Only the shim terminates TLS.
 
 	hostKey = "/run/workspace/host_key"
 
-	volumeControl  = "/run/tinfoil/volumes/workspace/control.sock"
 	volumeKeyBytes = 64
 	volumeTimeout  = 10 * time.Second
 
-	opUnlock     = "unlock"
-	opInitialize = "initialize"
+	volumeFormat byte = 2 // Argon2id
+	opUnlock     byte = 'u'
+	opInitialize byte = 'i'
 
 	statusOK       = "ok"
 	statusRejected = "rejected"
 
 	maxStatusBytes = 1 << 8
-	maxEnrollBytes = 1 << 12
-
-	coordinate = 32
+	maxEnrollBytes = 1 << 16
 
 	certificateSuffix = "-cert-v01@openssh.com"
-
-	sshPort   = 22
-	loginUser = "sandbox"
 )
 
+var (
+	disk          = "/mnt/disk"
+	volumeControl = "/run/tinfoil/volumes/workspace/control.sock"
+)
+
+type monitorRoute struct {
+	Domain   string `json:"domain"`
+	IP       string `json:"ip"`
+	Port     int    `json:"port"`
+	HostKey  string `json:"host_key"`
+	Identity string `json:"identity,omitempty"`
+}
+
+func (c monitorRoute) valid() bool {
+	ip := net.ParseIP(c.IP)
+	return ip != nil && ip.To4() != nil && ip.IsGlobalUnicast() && c.Port >= 1 && c.Port <= 65535 && c.Domain != "" &&
+		!strings.ContainsAny(c.Domain, "/:@ \r\n") && !strings.ContainsAny(c.HostKey, "\r\n") &&
+		(strings.HasPrefix(c.HostKey, "ssh-") || strings.HasPrefix(c.HostKey, "ecdsa-"))
+}
+
 type sandbox struct {
-	domain      string
-	issuer      string
-	permit      *ecdsa.PublicKey
-	nonce       string
-	fingerprint string
+	domain    string
+	ownerHash []byte
+	sshKey    string
 
 	done context.CancelFunc
 
-	mu       sync.Mutex
+	mu       sync.Mutex // Guards enrolled and opened.
 	enrolled bool
-
-	enrolling sync.Mutex
+	opened   []byte // Receipt of the enrollment that unlocked the volume.
 }
 
 func main() {
@@ -83,36 +87,36 @@ func main() {
 func run() error {
 	box := &sandbox{
 		domain: os.Getenv("DOMAIN"),
-		issuer: os.Getenv("SANDBOX_PERMIT_ISSUER"),
-		nonce:  rand.Text(),
 	}
 	if box.domain == "" {
 		return errors.New("DOMAIN is not set")
 	}
-	if box.issuer == "" {
-		return errors.New("SANDBOX_PERMIT_ISSUER is not set")
+	ownerHash, err := hex.DecodeString(os.Getenv("SANDBOX_OWNER_KEY_SHA256"))
+	if err != nil || len(ownerHash) != sha256.Size {
+		return errors.New("SANDBOX_OWNER_KEY_SHA256 must be a SHA-256 digest in hex")
 	}
-	permit, err := publicKey(os.Getenv("SANDBOX_PERMIT_KEY"))
+	box.ownerHash = ownerHash
+	keyData, err := os.ReadFile(hostKey + ".pub")
 	if err != nil {
-		return fmt.Errorf("SANDBOX_PERMIT_KEY: %w", err)
+		return err
 	}
-	box.permit = permit
-	if box.fingerprint, err = digest(hostKey + ".pub"); err != nil {
-		return fmt.Errorf("ssh host key: %w", err)
-	}
+	box.sshKey = strings.TrimSpace(string(keyData))
+	box.enrolled = box.sealed()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	box.done = stop
 
+	// The shim forwards enrollment after terminating its attested TLS connection.
 	server := &http.Server{
 		Addr:              listen,
 		Handler:           box.handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	defer server.Close()
 	served := make(chan error, 1)
 	go func() { served <- server.ListenAndServe() }()
-	log.Printf("workspace %s serving boot %s, awaiting enrollment", box.domain, box.nonce)
+	log.Printf("workspace %s serving enrollment", box.domain)
 	select {
 	case err := <-served:
 		return err
@@ -125,44 +129,31 @@ func run() error {
 
 func (s *sandbox) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("POST /enroll", s.enroll)
 	return mux
 }
 
-func (s *sandbox) health(w http.ResponseWriter, r *http.Request) {
-	reply(w, http.StatusOK, map[string]any{
-		"domain":   s.domain,
-		"nonce":    s.nonce,
-		"enrolled": s.isEnrolled(),
-		"ssh": map[string]any{
-			"port":     sshPort,
-			"user":     loginUser,
-			"host-key": s.fingerprint,
-		},
-	})
-}
-
-// The volume is opened before the owner is claimed, so a refused volume key leaves the permit unspent.
+// The measured owner digest authorizes enrollment before any disk or route changes.
 func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
-	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok {
-		reply(w, http.StatusUnauthorized, failure{"missing permit"})
-		return
-	}
-	if err := s.check(token); err != nil {
-		log.Printf("permit refused: %v", err)
-		reply(w, http.StatusForbidden, failure{"permit refused"})
-		return
-	}
 	var body struct {
-		Key    string `json:"key"`
-		Volume string `json:"volume"`
+		Key     string        `json:"key"`
+		Volume  string        `json:"volume"`
+		Monitor *monitorRoute `json:"monitor"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxEnrollBytes)).Decode(&body); err != nil {
 		reply(w, http.StatusBadRequest, failure{"enrollment is not a JSON object naming a key"})
 		return
 	}
+	// An uncontained sandbox enrolls without a Monitor. Reject an unusable one before opening the workspace.
+	if route := body.Monitor; route != nil && (!route.valid() || !strings.Contains(route.Identity, "PRIVATE KEY")) {
+		reply(w, http.StatusBadRequest, failure{"invalid Monitor enrollment"})
+		return
+	}
+	// Null clears an earlier boot's Monitor configuration.
+	monitor, _ := json.Marshal(body.Monitor)
 	volumeKey, err := workspaceKey(body.Volume)
 	if err != nil {
 		log.Printf("enrollment refused: %v", err)
@@ -170,41 +161,72 @@ func (s *sandbox) enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clear(volumeKey)
+	ownerHash := sha256.Sum256(volumeKey)
+	if subtle.ConstantTimeCompare(s.ownerHash, ownerHash[:]) != 1 {
+		reply(w, http.StatusForbidden, failure{"owner key refused"})
+		return
+	}
 	line, err := authorizedKey(body.Key)
 	if err != nil {
 		log.Printf("enrollment refused: %v", err)
 		reply(w, http.StatusBadRequest, failure{"key is not one SSH public key"})
 		return
 	}
-	s.enrolling.Lock()
-	defer s.enrolling.Unlock()
-	if s.isEnrolled() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	enrollment := s.receipt(line, volumeKey, body.Monitor)
+	if s.enrolled {
+		sealed, err := os.ReadFile(filepath.Join(disk, ".enrollment"))
+		if err == nil && subtle.ConstantTimeCompare(sealed, enrollment) == 1 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		log.Printf("enrollment refused: an owner is already enrolled for this boot")
 		reply(w, http.StatusConflict, failure{"sandbox is already enrolled"})
 		return
 	}
-	if err := open(volumeKey); err != nil {
-		log.Printf("workspace refused the key: %v", err)
-		reply(w, http.StatusForbidden, failure{"workspace key refused"})
+	// The volume worker unlocks once per boot, so a request that failed after the unlock
+	// can finish only with the same values.
+	if s.opened == nil {
+		if err := open(volumeKey); err != nil {
+			log.Printf("workspace refused the key: %v", err)
+			reply(w, http.StatusForbidden, failure{"workspace key refused"})
+			return
+		}
+		s.opened = enrollment
+	} else if subtle.ConstantTimeCompare(s.opened, enrollment) != 1 {
+		log.Printf("enrollment refused: another enrollment opened the workspace")
+		reply(w, http.StatusConflict, failure{"workspace was opened by another enrollment"})
 		return
 	}
-	if err := seal(line); err != nil {
+	if err := seal(line, monitor, enrollment); err != nil {
 		log.Printf("workspace provisioning failed: %v", err)
 		reply(w, http.StatusInternalServerError, failure{"workspace could not be provisioned"})
 		return
 	}
-	s.mu.Lock()
 	s.enrolled = true
-	s.mu.Unlock()
-	log.Printf("workspace %s enrolled an owner for boot %s", s.domain, s.nonce)
+	log.Printf("workspace %s enrolled its owner", s.domain)
 	w.WriteHeader(http.StatusNoContent)
 	s.done()
 }
 
-func (s *sandbox) isEnrolled() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.enrolled
+// receipt digests every enrollment value, so after a lost response only an identical
+// retry is acknowledged. The workspace key is random, so its digest reveals nothing.
+// The first line names this boot's key, since the disk outlives the boot.
+func (s *sandbox) receipt(line string, volumeKey []byte, route *monitorRoute) []byte {
+	data, _ := json.Marshal(struct {
+		Key     string
+		Volume  []byte
+		Monitor *monitorRoute
+	}{line, volumeKey, route})
+	return fmt.Appendf(nil, "%s\n%x\n", s.sshKey, sha256.Sum256(data))
+}
+
+// sealed reports whether this boot's enrollment finished. A restart after the unlock
+// finds the disk open, possibly with an earlier boot's enrollment on it.
+func (s *sandbox) sealed() bool {
+	data, err := os.ReadFile(filepath.Join(disk, ".enrollment"))
+	return err == nil && bytes.HasPrefix(data, []byte(s.sshKey+"\n"))
 }
 
 func workspaceKey(encoded string) ([]byte, error) {
@@ -255,11 +277,8 @@ func unlock(key []byte) error {
 }
 
 // No read deadline: a first unlock formats the volume, which takes minutes on a large disk.
-func control(operation string, key []byte) (string, error) {
-	packet, err := json.Marshal(request{Op: operation, Key: key})
-	if err != nil {
-		return "", err
-	}
+func control(operation byte, key []byte) (string, error) {
+	packet := append([]byte{volumeFormat, operation}, key...)
 	defer clear(packet)
 	connection, err := net.Dial("unixpacket", volumeControl)
 	if err != nil {
@@ -277,18 +296,7 @@ func control(operation string, key []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var status struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(reply[:n], &status); err != nil {
-		return "", err
-	}
-	return status.Status, nil
-}
-
-type request struct {
-	Op  string `json:"op"`
-	Key []byte `json:"key"`
+	return string(reply[:n]), nil
 }
 
 func device(path string) (uint64, error) {
@@ -299,9 +307,17 @@ func device(path string) (uint64, error) {
 	return info.Sys().(*syscall.Stat_t).Dev, nil
 }
 
-func seal(line string) error {
-	if err := os.WriteFile(authorized, []byte(line), 0o644); err != nil {
-		return err
+// seal leaves the enrollment on the disk it opened, so a restart inside a live CVM stages
+// it without a second enrollment. The receipt is written last and marks it complete.
+func seal(line string, monitor, enrollment []byte) error {
+	for _, file := range []struct {
+		name string
+		data []byte
+		mode os.FileMode
+	}{{".authorized_keys", []byte(line), 0o644}, {".monitor.json", monitor, 0o600}, {".enrollment", enrollment, 0o600}} {
+		if err := os.WriteFile(filepath.Join(disk, file.name), file.data, file.mode); err != nil {
+			return err
+		}
 	}
 	syscall.Sync()
 	return nil
@@ -326,115 +342,6 @@ func authorizedKey(line string) (string, error) {
 		return "", fmt.Errorf("key is a %s, not the %s the line names", named, fields[0])
 	}
 	return fields[0] + " " + fields[1] + "\n", nil
-}
-
-func digest(path string) (string, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	fields := strings.Fields(string(content))
-	if len(fields) < 2 {
-		return "", fmt.Errorf("%s is not a public key", path)
-	}
-	blob, err := base64.StdEncoding.DecodeString(fields[1])
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(blob)
-	return "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:]), nil
-}
-
-func (s *sandbox) check(token string) error {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return errors.New("token is not a JWS")
-	}
-	var header struct {
-		Algorithm string `json:"alg"`
-	}
-	if err := decode(parts[0], &header); err != nil {
-		return fmt.Errorf("token header: %w", err)
-	}
-	if header.Algorithm != "ES256" {
-		return fmt.Errorf("token algorithm is %q, not ES256", header.Algorithm)
-	}
-	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		return fmt.Errorf("token signature: %w", err)
-	}
-	if len(signature) != 2*coordinate {
-		return fmt.Errorf("token signature is %d bytes, want %d", len(signature), 2*coordinate)
-	}
-	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	if !ecdsa.Verify(s.permit,
-		digest[:],
-		new(big.Int).SetBytes(signature[:coordinate]),
-		new(big.Int).SetBytes(signature[coordinate:]),
-	) {
-		return errors.New("signature does not match the key this check trusts")
-	}
-	var claims struct {
-		Issuer   string          `json:"iss"`
-		Subject  string          `json:"sub"`
-		Audience json.RawMessage `json:"aud"`
-		Expires  int64           `json:"exp"`
-	}
-	if err := decode(parts[1], &claims); err != nil {
-		return fmt.Errorf("token claims: %w", err)
-	}
-	switch {
-	case claims.Issuer != s.issuer:
-		return fmt.Errorf("token issuer is %q, not %q", claims.Issuer, s.issuer)
-	case claims.Subject != s.domain:
-		return fmt.Errorf("token names %q, not this workspace", claims.Subject)
-	case claims.Expires == 0:
-		return errors.New("token does not expire")
-	case time.Now().After(time.Unix(claims.Expires, 0)):
-		return errors.New("token has expired")
-	case !slices.Contains(audiences(claims.Audience), s.nonce):
-		return errors.New("token is bound to another boot")
-	}
-	return nil
-}
-
-func publicKey(encoded string) (*ecdsa.PublicKey, error) {
-	if encoded == "" {
-		return nil, errors.New("no key given")
-	}
-	der, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
-	if err != nil {
-		return nil, err
-	}
-	parsed, err := x509.ParsePKIXPublicKey(der)
-	if err != nil {
-		return nil, err
-	}
-	key, ok := parsed.(*ecdsa.PublicKey)
-	if !ok || key.Curve != elliptic.P256() {
-		return nil, errors.New("key is not P-256")
-	}
-	return key, nil
-}
-
-func audiences(raw json.RawMessage) []string {
-	var many []string
-	if err := json.Unmarshal(raw, &many); err == nil {
-		return many
-	}
-	var one string
-	if err := json.Unmarshal(raw, &one); err == nil {
-		return []string{one}
-	}
-	return nil
-}
-
-func decode(segment string, into any) error {
-	raw, err := base64.RawURLEncoding.DecodeString(segment)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(raw, into)
 }
 
 type failure struct {

@@ -1,30 +1,72 @@
-# Tinfoil Containers release workflow (phase 2 — auto-triggered).
-#
-# DO NOT RUN MANUALLY. This workflow is dispatched automatically by
-# `tinfoil-release.yml` against the newly created release tag.
-
-name: Tinfoil Release - Publish (auto-triggered)
-
-run-name: Publish release ${{ github.ref_name }}
+name: Tinfoil Release - Publish
+run-name: Publish ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
 
 concurrency:
-  group: tinfoil-container-release-${{ github.ref_name }}
+  group: tinfoil-container-publish-${{ github.ref_name }}
 
 jobs:
-  measure-and-release:
+  publish-template:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
-      contents: write       # create the GitHub release
-      packages: write       # attach the attestation to the image
-      id-token: write       # keyless attestation signing
-      attestations: write   # publish the attestation
-
+      contents: write
+      id-token: write
+      attestations: write
     steps:
-      - name: Measure image, attest, and publish the release
-        uses: tinfoilsh/measure-image-action@4498a00d0887fc8979de4a7eadc73590a12ebb12 # v0.12.1
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
-          config-file: ${{ github.workspace }}/tinfoil-config.yml
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
+      - name: Verify the pinned runtime
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, re, urllib.request
+          from pathlib import Path
+          config = Path('tinfoil-config.yml').read_text()
+          match = re.search(r'^cvm-version: ([0-9][a-zA-Z0-9.-]*)@sha256:([0-9a-f]{64})$', config, re.M)
+          if not match:
+              raise SystemExit('Pin a runtime version and manifest SHA-256')
+          version, digest = match.groups()
+          name = f'tinfoil-inference-v{version}-manifest.json'
+          with urllib.request.urlopen(f'https://github.com/tinfoilsh/cvmimage/releases/download/v{version}/{name}', timeout=60) as response:
+              data = response.read(1024 * 1024)
+          if hashlib.sha256(data).hexdigest() != digest:
+              raise SystemExit('Runtime manifest does not match the template pin')
+          runtime = json.loads(data)
+          if runtime.get('version') != f'v{version}' or runtime.get('igvm', {}).get('format_version') != 1:
+              raise SystemExit('Sandbox requires a pinned IGVM runtime for config registry launches')
+          Path(name).write_bytes(data)
+          Path('runtime-manifest-path').write_text(name)
+          PY
+          gh attestation verify "$(cat runtime-manifest-path)" \
+            --repo tinfoilsh/cvmimage \
+            --predicate-type https://tinfoil.sh/predicate/snp-tdx-multiplatform/v2
+      - name: Attest the release template
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: tinfoil-config.yml
+      - name: Publish the template and its runtime manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          sha256sum tinfoil-config.yml > tinfoil-config.sha256
+          cat > release-notes.md <<'NOTES'
+          Confidential Agent Sandbox with owner-bound enrollment, an encrypted workspace, and optional Monitor routing. The image and RC3 IGVM runtime are pinned in the attached template.
+
+          Provision with the sandbox API or the current `tinfoil sandbox create` command in an organization with sandboxes enabled.
+
+          Each sandbox binds its owner key and workspace into a separate config registry revision. Clients verify that rendered configuration and the attested runtime before sending keys. This release attests the template's provenance; it does not claim a fixed launch measurement for the unbound template.
+          NOTES
+          release_flags=(--latest)
+          if [[ "$VERSION" == *-* ]]; then
+            release_flags=(--prerelease --latest=false)
+          fi
+          gh release create "$VERSION" --verify-tag "${release_flags[@]}" \
+            --title "$VERSION" --notes-file release-notes.md \
+            tinfoil-config.yml tinfoil-config.sha256 "$(cat runtime-manifest-path)"

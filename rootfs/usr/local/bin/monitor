@@ -1,0 +1,851 @@
+#!/usr/bin/env python3
+"""Discover and use connections through the monitor's authenticated SSH tunnel."""
+
+import argparse
+import contextlib
+import fnmatch
+import hashlib
+import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import select
+import shlex
+import signal
+import socket
+import socketserver
+import ssl
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from urllib.parse import urlsplit
+
+
+class MonitorError(Exception):
+    pass
+
+
+class Interrupted(Exception):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+class ResponseSocket:
+    def __init__(self, stream):
+        self.stream = stream
+
+    def makefile(self, mode):
+        return self.stream
+
+
+def ssh_failure(detail):
+    match = re.search(r"Could not resolve hostname (\S+): ", detail)
+    if match and re.search(r":\d+$", match[1]):
+        try:
+            ipaddress.ip_address(match[1])
+        except ValueError:
+            detail += (
+                "\nCheck your SSH alias: HostName must contain only the hostname; set Port separately."
+                "\nMonitor defaults to SSH port 2223. Port 8080 is the owner web API."
+            )
+    return detail
+
+
+class Client:
+    def __init__(self, ssh_host="monitor", ssh_config=None, timeout=300):
+        self.ssh_host = ssh_host
+        self.ssh_config = ssh_config
+        self.timeout = timeout
+        self.control = None
+
+    def ssh(self):
+        command = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                   "-o", "StrictHostKeyChecking=yes", "-o", "PermitLocalCommand=no",
+                   "-o", "ForwardAgent=no", "-o", "ForwardX11=no"]
+        if self.ssh_config:
+            command += ["-F", self.ssh_config]
+        command += ["-S", self.control or "none", "-o", "ControlMaster=no"]
+        return command
+
+    def exchange(self, command, request, host):
+        # communicate(input=...) closes stdin before the reply. ssh forwards that
+        # EOF, and Go's HTTP server cancels the request when it reads it.
+        timed_out = threading.Event()
+        with tempfile.TemporaryFile() as stderr, subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr
+        ) as process:
+            def expire():
+                timed_out.set()
+                process.kill()
+
+            timer = threading.Timer(self.timeout, expire)
+            timer.start()
+            failure = None
+            response = None
+            try:
+                process.stdin.write(request)
+                process.stdin.flush()
+                # Read HTTP framing before closing stdin. Waiting for SSH to exit
+                # first would deadlock because it can wait for our EOF in turn.
+                response = http.client.HTTPResponse(ResponseSocket(process.stdout))
+                response.begin()
+                content = response.read()
+                process.stdin.close()
+                process.wait()
+            except (http.client.HTTPException, OSError, ValueError) as error:
+                failure = error
+            finally:
+                timer.cancel()
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+                timer.join()
+                if response is not None:
+                    response.close()
+            if timed_out.is_set():
+                raise MonitorError("request timed out; an action may have run. Check Monitor activity before retrying")
+            stderr.seek(0)
+            detail = ssh_failure(stderr.read().decode(errors="replace").strip())
+            if failure:
+                raise MonitorError(f"request to {host} failed: {detail or failure}") from failure
+            if process.returncode:
+                raise MonitorError(f"SSH connection failed: {detail or process.returncode}. Check the {self.ssh_host!r} SSH configuration")
+            return response.status, content
+
+    def request(self, host, method, path, body=None):
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\.monitor", host):
+            raise MonitorError(f"invalid connection host: {host!r}")
+        data = json.dumps(body, ensure_ascii=False).encode() if body is not None else b""
+        request = (
+            f"{method} {path} HTTP/1.1\r\nHost: {host}\r\n"
+            f"Connection: close\r\nContent-Type: application/json\r\n"
+            f"Content-Length: {len(data)}\r\n\r\n"
+        ).encode() + data
+        command = self.ssh() + ["-o", "ClearAllForwardings=yes"]
+        command += ["-W", f"{host}:80", "--", self.ssh_host]
+        status, content = self.exchange(command, request, host)
+        if status >= 300:
+            detail = content.decode(errors="replace").strip()
+            raise MonitorError(f"HTTP {status}: {detail}")
+        return content
+
+    def connections(self):
+        try:
+            return json.loads(self.request("agent.monitor", "GET", "/connections"))["connections"]
+        except (ValueError, KeyError, TypeError) as error:
+            raise MonitorError("invalid connection catalog from the monitor") from error
+
+
+
+def receive(sock, size):
+    data = b""
+    while len(data) < size:
+        part = sock.recv(size - len(data))
+        if not part:
+            raise MonitorError("Monitor tunnel closed")
+        data += part
+    return data
+
+
+def relay(left, right):
+    # Keep the opposite direction alive after EOF, including streamed responses.
+    readable = [left, right]
+    while readable:
+        ready, _, _ = select.select(readable, [], [])
+        for source in ready:
+            target = right if source is left else left
+            data = source.recv(65536)
+            if data:
+                target.sendall(data)
+            else:
+                readable.remove(source)
+                with contextlib.suppress(OSError):
+                    target.shutdown(socket.SHUT_WR)
+
+
+class ProxyHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    rbufsize = 0  # relay must see bytes following the request headers.
+
+    def log_message(self, *args):
+        pass
+
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (OSError, MonitorError):
+            self.close_connection = True
+
+    def do_CONNECT(self):
+        self.proxy(True)
+
+    def do_GET(self):
+        self.proxy(False)
+
+    do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = do_GET
+
+    def proxy(self, connect):
+        self.close_connection = True
+        started = False
+        try:
+            target = urlsplit("//" + self.path if connect else self.path)
+            if target.username is not None or not target.hostname:
+                raise MonitorError("proxy request needs a host")
+            if not connect and target.scheme != "http":
+                raise MonitorError("use CONNECT for HTTPS")
+            port = target.port or (443 if connect else 80)
+            host = target.hostname
+            with self.server.session.stream(host, port) as upstream:
+                if connect:
+                    self.send_response_only(200, "Connection established")
+                    self.end_headers()
+                    started = True
+                else:
+                    path = target.path or "/"
+                    if target.query:
+                        path += "?" + target.query
+                    header = f"{self.command} {path} HTTP/1.1\r\nHost: {target.netloc}\r\nConnection: close\r\n"
+                    for name, value in self.headers.items():
+                        if name.lower() not in ("host", "connection", "proxy-connection", "proxy-authorization"):
+                            header += f"{name}: {value}\r\n"
+                    upstream.sendall((header + "\r\n").encode("latin-1"))
+                    started = True
+                relay(self.connection, upstream)
+        except (OSError, ValueError, MonitorError) as error:
+            if not started:
+                with contextlib.suppress(OSError):
+                    self.send_error(502, "Monitor forwarding failed", str(error))
+
+
+class ForwardHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        try:
+            with self.server.session.stream("mcp.monitor", 80, route=False) as upstream:
+                relay(self.request, upstream)
+        except (OSError, MonitorError):
+            pass  # EOF tells the MCP client that its request did not complete.
+
+
+class ForwardServer(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+    allow_reuse_address = False
+
+
+def loopback_address(value):
+    try:
+        parsed = urlsplit("//" + value)
+        host, port = parsed.hostname, parsed.port
+        if not host or port is None or not ipaddress.ip_address(host).is_loopback:
+            raise ValueError()
+        return host, port
+    except ValueError as error:
+        raise MonitorError("--listen must be a loopback IP and port, for example 127.0.0.1:8400 or [::1]:8400") from error
+
+
+class Session:
+    def __init__(self, client):
+        self.client = client
+        self.master = None
+        self.servers = []
+        self.routes = []
+        self.temporary = None
+        self.log = None
+        self.active = set()
+        self.lock = threading.Lock()
+
+    def __enter__(self):
+        # A short path also fits macOS's Unix socket path limit.
+        self.temporary = tempfile.TemporaryDirectory(prefix="monitor-", dir="/tmp")
+        self.directory = Path(self.temporary.name)
+        self.client.control = str(self.directory / "ssh")
+        self.log = tempfile.TemporaryFile()
+        try:
+            command = ["ControlMaster=yes" if a == "ControlMaster=no" else a for a in self.client.ssh()]
+            command += ["-o", "ControlPersist=no", "-o", "ClearAllForwardings=yes",
+                        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2",
+                        "-N", "--", self.client.ssh_host]
+            self.master = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                           stderr=self.log, start_new_session=True)
+            deadline = time.monotonic() + min(self.client.timeout, 15)
+            while not Path(self.client.control).exists():
+                self.check()
+                if time.monotonic() >= deadline:
+                    raise MonitorError("SSH setup timed out; check the endpoint, paired key and pinned host key")
+                time.sleep(0.02)
+            self.control("check")
+            # OpenSSH owns the port after -O forward succeeds. A bind race fails
+            # setup and never starts the child with somebody else's listener.
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                self.socks_port = reservation.getsockname()[1]
+            self.control("forward", "-D", f"127.0.0.1:{self.socks_port}")
+            with socket.create_connection(("127.0.0.1", self.socks_port), timeout=5) as probe:
+                probe.sendall(b"\x05\x01\x00")
+                if receive(probe, 2) != b"\x05\x00":
+                    raise MonitorError("SSH SOCKS listener is not ready")
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def control(self, action, *options):
+        command = ["ssh", "-F", "/dev/null", "-S", self.client.control, "-O", action,
+                   "-o", "ExitOnForwardFailure=yes", *options, "--", self.client.ssh_host]
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
+        if result.returncode:
+            raise MonitorError(f"SSH {action} failed: {result.stderr.decode(errors='replace').strip()}")
+
+    def check(self):
+        if self.master.poll() is not None:
+            self.log.seek(0)
+            detail = ssh_failure(self.log.read().decode(errors="replace").strip())
+            raise MonitorError(f"SSH tunnel stopped: {detail or self.master.returncode}")
+
+    @contextlib.contextmanager
+    def stream(self, host, port, route=True):
+        self.check()
+        if route:
+            matches, best = [], -1
+            for connection in self.routes:
+                origins = [urlsplit(slot["origin"]) for slot in connection["slots"] or []]
+                exact = any(o.hostname == host and (o.port or 443) == port for o in origins)
+                score = len(host) if exact else -1
+                if port in (80, 443):
+                    score = max([score] + [len(h) for h in connection["hosts"] or [] if fnmatch.fnmatchcase(host, h)])
+                if score > best:
+                    best, matches = score, [connection["name"]]
+                elif score >= 0 and score == best:
+                    matches.append(connection["name"])
+            if len(matches) > 1:
+                raise MonitorError(f"ambiguous route to {host}; select an HTTP connection with --connection NAME")
+            if matches:
+                host = matches[0] + ".monitor"
+        encoded = host.encode("idna")
+        if len(encoded) > 255 or not 0 < port < 65536:
+            raise MonitorError("invalid forwarding target")
+        connection = socket.create_connection(("127.0.0.1", self.socks_port), timeout=min(self.client.timeout, 15))
+        with self.lock:
+            self.active.add(connection)
+        try:
+            connection.sendall(b"\x05\x01\x00")
+            if receive(connection, 2) != b"\x05\x00":
+                raise MonitorError("SSH SOCKS authentication failed")
+            connection.sendall(b"\x05\x01\x00\x03" + bytes([len(encoded)]) + encoded + struct.pack("!H", port))
+            version, status, _, kind = receive(connection, 4)
+            if version != 5 or status != 0:
+                raise MonitorError(f"Monitor refused {host}:{port}; check connection access and readiness")
+            size = {1: 4, 4: 16}.get(kind)
+            if kind == 3:
+                size = receive(connection, 1)[0]
+            if size is None:
+                raise MonitorError("invalid SOCKS reply")
+            receive(connection, size + 2)
+            connection.settimeout(None)
+            yield connection
+        finally:
+            with self.lock:
+                self.active.discard(connection)
+            connection.close()
+
+    def listen(self, address, handler, http=False):
+        host, port = address
+        cls = ThreadingHTTPServer if http else ForwardServer
+        if ":" in host:
+            cls = type("IPv6Server", (cls,), {"address_family": socket.AF_INET6})
+        server = cls((host, port), handler)
+        server.daemon_threads = True
+        server.session = self
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True)
+        self.servers.append((server, thread))
+        thread.start()
+        return server.server_address[1]
+
+    def __exit__(self, *args):
+        for server, thread in self.servers:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+        with self.lock:
+            for connection in self.active:
+                with contextlib.suppress(OSError):
+                    connection.shutdown(socket.SHUT_RDWR)
+        if self.master is not None and self.master.poll() is None:
+            self.master.terminate()
+            try:
+                self.master.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.master.kill()
+                self.master.wait()
+        self.client.control = None
+        if self.log:
+            self.log.close()
+        if self.temporary:
+            self.temporary.cleanup()
+
+    def environment(self, selected, profile):
+        try:
+            setup = json.loads(self.client.request("agent.monitor", "GET", "/connections"))
+            connections = [c for c in setup["connections"] if c["kind"] == "http"]
+            ca = setup["ca"]
+            if not isinstance(ca, str) or not ca:
+                raise ValueError()
+        except (ValueError, KeyError, TypeError) as error:
+            raise MonitorError("invalid connection catalog from the monitor") from error
+        credential_names = {name for c in connections for name in c["placeholders"]}
+        if selected:
+            missing = set(selected) - {c["name"] for c in connections}
+            if missing:
+                raise MonitorError(f"HTTP connections are not accessible: {', '.join(sorted(missing))}")
+            connections = [c for c in connections if c["name"] in selected]
+        for connection in connections:
+            name = connection["name"]
+            if connection["state"] != "ready":
+                if selected:
+                    raise MonitorError(f"connection {name!r} is not ready; check monitor connections")
+                print(f"monitor: connection {name!r} is not ready; other connections remain available", file=sys.stderr)
+        placeholders, shared = credential_environment(connections)
+        for variable, names in shared.items():
+            print(f"monitor: {variable} is shared; use " + ", ".join("$" + name for name in names), file=sys.stderr)
+        self.routes = connections
+        # Validate the CA without modifying either the system or user trust store.
+        trust = ssl.create_default_context()
+        public_roots = "".join(ssl.DER_cert_to_PEM_cert(c) for c in trust.get_ca_certs(binary_form=True))
+        trust.load_verify_locations(cadata=ca)
+        bundle = self.directory / "ca.pem"
+        bundle.write_text(public_roots + ca)
+        bundle.chmod(0o600)
+        port = self.listen(("127.0.0.1", 0), ProxyHandler, http=True)
+        proxy = f"http://127.0.0.1:{port}"
+        env = os.environ.copy()
+        for name in list(env):
+            if name.startswith("MONITOR_CREDENTIAL_"):
+                env.pop(name)
+        for name in credential_names - RESERVED_ENV:
+            env.pop(name, None)
+        env.pop("GH_TOKEN", None)
+        env.update(placeholders)
+        if "GITHUB_TOKEN" in placeholders:
+            env["GH_TOKEN"] = placeholders["GITHUB_TOKEN"]
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            env[name] = env[name.lower()] = proxy
+        env["NO_PROXY"] = env["no_proxy"] = ""
+        for name in ("SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO", "NIX_SSL_CERT_FILE"):
+            env[name] = str(bundle)
+        env["NODE_USE_ENV_PROXY"] = "1"
+        env["NODE_TLS_REJECT_UNAUTHORIZED"] = "1"
+        for name in ("GIT_SSL_NO_VERIFY", "GIT_CONFIG_PARAMETERS", "PYTHONHTTPSVERIFY", "REQUEST_METHOD"):
+            env.pop(name, None)
+        env["MONITOR_SESSION"] = str(self.directory)
+        env["MONITOR_CLIENT_PROFILE"] = profile or self.client.ssh_host
+        env["MONITOR_SSH_HOST"] = self.client.ssh_host
+        if self.client.ssh_config:
+            env["MONITOR_SSH_CONFIG"] = os.path.abspath(self.client.ssh_config)
+        else:
+            env.pop("MONITOR_SSH_CONFIG", None)
+        git_slots = [{"origin": s["origin"], "path": s.get("path", ""), "password": c["placeholders"][s["value"]]}
+                     for c in connections for s in c["slots"] or []
+                     if s.get("basic") == "password" and s["origin"] == "https://github.com" and s["value"] in c["placeholders"]]
+        helper = self.directory / "git-credential"
+        helper.write_text(GIT_HELPER.replace("SLOTS = []", "SLOTS = " + repr(git_slots)))
+        helper.chmod(0o700)
+        git_settings = [("http.proxy", proxy), ("http.sslCAInfo", str(bundle)), ("http.sslVerify", "true"),
+                        ("credential.helper", ""), ("credential.helper", "!" + shlex.quote(sys.executable) + " " + shlex.quote(str(helper))),
+                        ("credential.useHttpPath", "true")]
+        for origin in sorted({s["origin"] for s in git_slots}):
+            # URL-specific Git configuration outranks generic http settings.
+            for key, value in (("proxy", proxy), ("sslCAInfo", str(bundle)), ("sslVerify", "true"), ("extraHeader", "")):
+                git_settings.append((f"http.{origin}.{key}", value))
+        try:
+            count = int(env.get("GIT_CONFIG_COUNT", "0"))
+            if count < 0:
+                raise ValueError()
+        except ValueError as error:
+            raise MonitorError("invalid inherited GIT_CONFIG_COUNT") from error
+        for key, value in git_settings:
+            env[f"GIT_CONFIG_KEY_{count}"], env[f"GIT_CONFIG_VALUE_{count}"] = key, value
+            count += 1
+        env["GIT_CONFIG_COUNT"] = str(count)
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        return env
+
+
+RESERVED_ENV = {
+    "PATH", "HOME", "SHELL", "ENV", "BASH_ENV", "ZDOTDIR", "PS1", "PROMPT_COMMAND", "PYTHONPATH",
+    "PYTHONHOME", "PYTHONSTARTUP", "NODE_OPTIONS", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "GIT_SSL_CAINFO", "NIX_SSL_CERT_FILE",
+    "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS", "OPENSSL_CONF", "OPENSSL_MODULES",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+}
+
+
+def credential_environment(connections):
+    """Keep every placeholder; export a bare variable only if it is unambiguous."""
+    credentials, by_variable, by_name = [], {}, {}
+    for connection in sorted(connections, key=lambda c: c["name"]):
+        for variable, value in sorted(connection["placeholders"].items()):
+            name = connection["name"]
+            if value != f"tfm_{name}_{variable}":
+                raise MonitorError(f"invalid placeholder for {name}.{variable}")
+            qualified = "MONITOR_CREDENTIAL_" + re.sub(r"[^A-Z0-9_]", "_", f"{name}_{variable}".upper())
+            entry = (name, variable, value, qualified)
+            credentials.append(entry)
+            by_variable.setdefault(variable, []).append(entry)
+            by_name.setdefault(qualified, []).append(entry)
+
+    env, qualified_names = {}, {}
+    for name, variable, value, qualified in credentials:
+        if len(by_name[qualified]) > 1:
+            # Case folding and punctuation can make different names look alike.
+            suffix = hashlib.sha256(json.dumps([name, variable]).encode()).hexdigest()[:12].upper()
+            qualified += "_" + suffix
+            while qualified in by_name or qualified in env:
+                qualified += "_"
+        env[qualified] = value
+        qualified_names[name, variable] = qualified
+
+    shared = {}
+    for variable, entries in by_variable.items():
+        # A credential called PATH is still usable through its qualified name.
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable) or variable in RESERVED_ENV or variable.startswith(("MONITOR_", "GIT_CONFIG_", "LD_", "DYLD_")):
+            continue
+        if len(entries) == 1:
+            env[variable] = entries[0][2]
+        else:
+            shared[variable] = [qualified_names[name, variable] for name, variable, _, _ in entries]
+    return env, shared
+
+GIT_HELPER = '''import sys
+SLOTS = []
+if sys.argv[1:] != ["get"]:
+    sys.exit(0)
+fields = dict(line.rstrip("\\n").split("=", 1) for line in sys.stdin if "=" in line)
+origin = fields.get("protocol", "") + "://" + fields.get("host", "")
+path = "/" + fields.get("path", "").lstrip("/")
+slots = [s for s in SLOTS if s["origin"] == origin and
+         (path == s["path"] or path.startswith(s["path"].rstrip("/") + "/"))]
+if len(slots) == 1:
+    print("username=x-access-token")
+    print("password=" + slots[0]["password"])
+'''
+
+
+def foreground(group):
+    if sys.stdin.isatty():
+        previous = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+        try:
+            os.tcsetpgrp(sys.stdin.fileno(), group)
+        finally:
+            signal.signal(signal.SIGTTOU, previous)
+
+
+def run_child(session, command, env):
+    parent_group = os.tcgetpgrp(sys.stdin.fileno()) if sys.stdin.isatty() else None
+    child = subprocess.Popen(command, env=env, process_group=0)
+    previous = {}
+    stopped = []
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            def forward(signum, frame):
+                if not stopped:
+                    stopped.extend([time.monotonic(), signum])
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(child.pid, signum)
+            previous[signum] = signal.signal(signum, forward)
+        foreground(child.pid)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child.pid, signal.SIGCONT)
+        while child.poll() is None:
+            session.check()
+            if stopped and time.monotonic() - stopped[0] > 2:
+                return 128 + stopped[1]
+            time.sleep(0.05)
+        return child.returncode if child.returncode >= 0 else 128 - child.returncode
+    finally:
+        # SIGHUP asks interactive shells to close jobs in their own process groups.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child.pid, signal.SIGHUP)
+        try:
+            child.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child.pid, signal.SIGKILL)
+        if parent_group is not None:
+            foreground(parent_group)
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def shell_command(session, env, shell):
+    name = Path(shell).name
+    if name not in ("bash", "zsh"):
+        raise MonitorError("monitor shell supports bash and zsh; use --shell /path/to/bash")
+    label = re.sub(r"[^a-zA-Z0-9_.-]", "_", env["MONITOR_CLIENT_PROFILE"])
+    # User startup files are deliberately skipped so they cannot silently change
+    # account selection or routing. zsh always reads its system zshenv first.
+    exports = "\n".join(f"export {key}={shlex.quote(value)}" for key, value in env.items()
+                        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key))
+    if name == "bash":
+        rc = session.directory / "bashrc"
+        rc.write_text(exports + f"\nPS1='[monitor:{label}] \\w\\$ '\n" +
+                      "trap 'jobs -pr | while read -r pid; do kill -HUP -- -\"$pid\" 2>/dev/null; done' EXIT\n")
+        return [shell, "--noprofile", "--rcfile", str(rc), "-i"]
+    (session.directory / ".zshenv").write_text("unsetopt GLOBAL_RCS\n")
+    (session.directory / ".zshrc").write_text(exports + f"\nPROMPT='[monitor:{label}] %~%# '\n")
+    env["ZDOTDIR"] = str(session.directory)
+    return [shell, "-d", "-i"]
+
+
+def mcp_probe(host, port, timeout):
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    sequence = 0
+
+    def request(method, params=None, notification=False):
+        nonlocal sequence
+        sequence += 1
+        message = {"jsonrpc": "2.0", "method": method}
+        if not notification:
+            message["id"] = sequence
+        if params is not None:
+            message["params"] = params
+        connection = http.client.HTTPConnection(host, port, timeout=timeout)
+        try:
+            connection.request("POST", "/", json.dumps(message), headers)
+            response = connection.getresponse()
+            if response.status >= 300:
+                raise MonitorError(f"MCP {method} failed: HTTP {response.status}")
+            if notification:
+                response.read()
+                return
+            if response.getheader("Mcp-Session-Id"):
+                headers["Mcp-Session-Id"] = response.getheader("Mcp-Session-Id")
+            if "text/event-stream" in response.getheader("Content-Type", ""):
+                data = []
+                while True:
+                    line = response.readline(1 << 20)
+                    if not line:
+                        raise MonitorError(f"MCP {method} stream ended before its reply")
+                    if line.rstrip(b"\r\n") == b"":
+                        if data:
+                            result = json.loads(b"\n".join(data))
+                            if result.get("id") == sequence:
+                                break
+                            data = []
+                    elif line.startswith(b"data:"):
+                        data.append(line[5:].strip())
+            else:
+                result = json.loads(response.read(16 << 20))
+            if result.get("id") != sequence or "error" in result or "result" not in result:
+                raise MonitorError(f"MCP {method} failed: {result.get('error', 'invalid response')}")
+            return result["result"]
+        finally:
+            connection.close()
+
+    initialized = request("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
+                                         "clientInfo": {"name": "monitor-client", "version": "1"}})
+    version = initialized.get("protocolVersion")
+    if version not in ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"):
+        raise MonitorError(f"unsupported MCP protocol version: {version}")
+    headers["MCP-Protocol-Version"] = version
+    request("notifications/initialized", notification=True)
+    count, cursor, seen = 0, None, set()
+    while True:
+        result = request("tools/list", {"cursor": cursor} if cursor else {})
+        if not isinstance(result.get("tools"), list):
+            raise MonitorError("MCP tools/list returned an invalid tool list")
+        count += len(result["tools"])
+        cursor = result.get("nextCursor")
+        if not cursor:
+            return count
+        if cursor in seen or len(seen) >= 1000:
+            raise MonitorError("MCP tools/list pagination did not finish")
+        seen.add(cursor)
+
+
+def managed_command(client, args):
+    if args.command == "run":
+        command = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
+        if not command:
+            raise MonitorError("usage: monitor run [--connection NAME] -- COMMAND [ARG ...]")
+    elif args.command == "mcp":
+        address = loopback_address(args.listen)
+    with Session(client) as session:
+        if args.command == "mcp":
+            connections = [c for c in client.connections() if c["kind"] == "mcp"]
+            if not connections:
+                raise MonitorError("no reachable MCP connections; an HTTP API account alone does not provide MCP tools")
+            for connection in connections:
+                if connection["state"] != "ready":
+                    print(f"monitor: MCP connection {connection['name']} is {connection['state']}", file=sys.stderr)
+            if not any(c["state"] == "ready" for c in connections):
+                raise MonitorError("no MCP connections are ready")
+            port = session.listen(address, ForwardHandler)
+            count = mcp_probe(address[0], port, client.timeout)
+            host = f"[{address[0]}]" if ":" in address[0] else address[0]
+            print(f"monitor: MCP ready at http://{host}:{port}/ ({count} tools)", file=sys.stderr, flush=True)
+            if not count:
+                print("monitor: no tools are visible; check account access and tool review in the web app", file=sys.stderr)
+            while True:
+                session.check()
+                time.sleep(0.1)
+        env = session.environment(args.connection, args.profile)
+        if args.command == "shell":
+            command = shell_command(session, env, args.shell)
+        return run_child(session, command, env)
+
+
+def load_profile(args):
+    if not args.profile:
+        return
+    try:
+        config = json.loads(Path(args.client_config).expanduser().read_text())
+        profile = config["profiles"][args.profile]
+        if not isinstance(profile, dict):
+            raise ValueError()
+        for key in ("ssh_host", "ssh_config"):
+            if key in profile and not isinstance(profile[key], str):
+                raise ValueError()
+        connections = profile.get("connections", [])
+        if not isinstance(connections, list) or any(not isinstance(c, str) for c in connections):
+            raise ValueError()
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise MonitorError(f"cannot load profile {args.profile!r} from {args.client_config}: {error}") from error
+    args.ssh_host = args.ssh_host or profile.get("ssh_host", "monitor")
+    args.ssh_config = args.ssh_config or profile.get("ssh_config")
+    if hasattr(args, "connection") and args.command in ("run", "shell"):
+        args.connection = args.connection or connections
+
+
+def network_config(socks_port, monitor_ip):
+    # FakeIP keeps the hostname intact through the TUN and SSH SOCKS hop.
+    # No upstream DNS or direct outbound exists in this configuration.
+    return {
+        "log": {"level": "warn"},
+        "dns": {
+            "servers": [{"type": "hosts", "tag": "hosts"},
+                        {"type": "fakeip", "tag": "fakeip", "inet4_range": "198.18.0.0/15"}],
+            "rules": [{"query_type": ["A"], "server": "fakeip"},
+                      {"action": "predefined", "rcode": "NOERROR"}],
+        },
+        "inbounds": [{"type": "tun", "interface_name": "monitor0",
+                      "address": ["100.127.255.1/30", "fdfe:dcba:9876::1/126"],
+                      "auto_route": True, "route_exclude_address": [monitor_ip + "/32", "172.31.255.0/30"]}],
+        "outbounds": [{"type": "socks", "tag": "monitor", "server": "127.0.0.1",
+                       "server_port": socks_port, "network": "tcp"}],
+        "route": {
+            "rules": [{"action": "sniff"}, {"protocol": "dns", "action": "hijack-dns"},
+                      {"network": "udp", "action": "reject"}],
+            "final": "monitor",
+        },
+    }
+
+
+def network_command(client):
+    if os.geteuid() != 0:
+        raise MonitorError("system-wide routing requires root; use systemctl start monitor-network")
+    with Session(client) as session:
+        setup = json.loads(client.request("agent.monitor", "GET", "/connections"))
+        ca = setup["ca"]
+        if not isinstance(ca, str) or not ca:
+            raise MonitorError("Monitor did not supply a CA")
+        ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=ca)
+        certificate = Path("/usr/local/share/ca-certificates/monitor.crt")
+        if not certificate.exists() or certificate.read_text() != ca:
+            temporary = certificate.with_suffix(".tmp")
+            temporary.write_text(ca)
+            temporary.chmod(0o644)
+            temporary.replace(certificate)
+        subprocess.run(["update-ca-certificates", "--fresh"], check=True)
+        config = session.directory / "sing-box.json"
+        route = json.loads(Path("/run/monitor/route.json").read_text())
+        config.write_text(json.dumps(network_config(session.socks_port, route["ip"])))
+        # run_child tears down the TUN on tunnel loss. Host containment stays active.
+        return run_child(session, ["/usr/local/bin/sing-box", "run", "-c", str(config)], os.environ.copy())
+
+
+
+def parser():
+    p = argparse.ArgumentParser(
+        prog="monitor",
+        description="Discover and use the external services available to this agent.",
+        epilog="Commands use your paired SSH identity and follow Monitor policy.",
+    )
+    p.add_argument("--ssh-host", help="SSH host alias (default: MONITOR_SSH_HOST or monitor)")
+    p.add_argument("--ssh-config", help="SSH configuration file (default: MONITOR_SSH_CONFIG)")
+    p.add_argument("--profile", help="local profile in the client configuration")
+    p.add_argument("--client-config", default=str(Path.home() / ".config/monitor/client.json"), help="client profiles JSON file")
+    p.add_argument("--timeout", type=float, default=300, help="request timeout in seconds (default: 300)")
+    commands = p.add_subparsers(dest="command", required=True)
+    run = commands.add_parser("run", help="run a local command through Monitor")
+    run.add_argument("--connection", action="append", default=[], metavar="NAME", help="HTTP connection to use; repeat for several")
+    run.add_argument("argv", nargs=argparse.REMAINDER, help="-- COMMAND [ARG ...]")
+    shell = commands.add_parser("shell", help="start a local bash or zsh with Monitor routing")
+    shell.add_argument("--connection", action="append", default=[], metavar="NAME", help="HTTP connection to use; repeat for several")
+    shell.add_argument("--shell", default=os.environ.get("SHELL", "/bin/bash"), help="bash or zsh executable; startup files are skipped")
+    mcp = commands.add_parser("mcp", help="connect MCP clients to Monitor")
+    serve = mcp.add_subparsers(dest="action", required=True).add_parser("serve", help="serve the MCP gateway on loopback")
+    serve.add_argument("--listen", default="127.0.0.1:8400", help="loopback IP:port; port 0 selects a free port")
+    connections = commands.add_parser("connections", help="list reachable connections and their current status")
+    connections.add_argument("--json", action="store_true", help="include account, host and access settings as JSON")
+    commands.add_parser("network", help="run the system-wide SSH/TUN service (root only)")
+    return p
+
+
+def main(argv=None):
+    p = parser()
+    args = p.parse_args(argv)
+    if not 0 < args.timeout < float("inf"):
+        p.error("--timeout must be a positive, finite number")
+    previous = {}
+    try:
+        load_profile(args)
+        args.ssh_host = args.ssh_host or os.environ.get("MONITOR_SSH_HOST", "monitor")
+        args.ssh_config = args.ssh_config or os.environ.get("MONITOR_SSH_CONFIG")
+        if args.ssh_config:
+            args.ssh_config = os.path.abspath(os.path.expanduser(args.ssh_config))
+        client = Client(args.ssh_host, args.ssh_config, args.timeout)
+        if args.command in ("run", "shell", "mcp", "network"):
+            if sys.version_info < (3, 11):
+                raise MonitorError("this command requires Python 3.11 or newer")
+            def interrupted(signum, frame):
+                raise Interrupted(signum)
+            for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+                previous[signum] = signal.signal(signum, interrupted)
+            if args.command == "network":
+                return network_command(client)
+            return managed_command(client, args)
+        connections = client.connections()
+        if args.json:
+            print(json.dumps({"connections": connections}, indent=2))
+        elif connections:
+            rows = [("KIND", "NAME", "STATE", "HOST")] + [
+                (c["kind"], c["name"], c["state"], c["host"]) for c in connections
+            ]
+            widths = [max(len(row[i]) for row in rows) for i in range(4)]
+            for row in rows:
+                print("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip())
+        else:
+            print("No connections are available to this agent. Ask the owner to grant access.")
+        return 0
+    except (MonitorError, OSError, http.client.HTTPException, subprocess.SubprocessError, ValueError, KeyError, EOFError) as error:
+        print(f"monitor: {error}", file=sys.stderr)
+        return 1
+    except Interrupted as error:
+        return 128 + error.signum
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
