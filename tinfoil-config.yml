@@ -74,7 +74,8 @@ containers:
       start_period: 120s
 
 shim:
-  # The shim supplies attestation and TLS; the workload authenticates the owner key.
+  # Owner access uses attested SSH through Monitor, so no public CA is needed.
+  tls-mode: self-signed
   upstream-port: 8080
   authenticated: false
   paths:
