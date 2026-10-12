@@ -1,0 +1,60 @@
+#!/usr/bin/python3 -I
+"""Prepare the measured owner login key and the boot key's TLS certificate."""
+
+import base64
+import ipaddress
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import uuid
+
+
+def owner_key(value):
+    prefix, _, encoded = value.partition(":")
+    raw = base64.b64decode(encoded, validate=True)
+    if prefix != "ed25519" or len(raw) != 32 or base64.b64encode(raw).decode() != encoded:
+        raise ValueError("SANDBOX_OWNER_PUBLIC_KEY must be ed25519: followed by a base64 public key")
+    # SSH encodes the algorithm name and public key as length-prefixed strings.
+    return "ssh-ed25519 " + base64.b64encode(b"\0\0\0\x0bssh-ed25519\0\0\0\x20" + raw).decode() + "\n"
+
+
+def prepare(directory, environment):
+    authorized = directory / "authorized_keys"
+    authorized.write_text(owner_key(environment["SANDBOX_OWNER_PUBLIC_KEY"]))
+    authorized.chmod(0o644)
+    instance = str(uuid.UUID(environment["SANDBOX_INSTANCE_ID"]))
+    binding = json.loads(environment["MONITOR_BINDING"])
+    if set(binding) != {"container_id", "owner_public_key"}:
+        raise ValueError("invalid MONITOR_BINDING")
+    uuid.UUID(binding["container_id"])
+    owner_key(binding["owner_public_key"])
+    endpoint = environment.get("MONITOR_ENDPOINT", "")
+    context = {"binding": binding}
+    if endpoint:
+        ip, port = endpoint.split(":")
+        address = ipaddress.IPv4Address(ip)
+        port = int(port)
+        if (address.is_loopback or address.is_link_local or address.is_multicast
+                or address.is_unspecified or int(address) == 0xffffffff or not 1 <= port <= 65535):
+            raise ValueError("invalid MONITOR_ENDPOINT")
+        context.update(ip=str(address), port=port)
+        (directory / "monitor-bootstrap.conf").write_text(
+            f"HostName {address}\nPort {port}\nUser sandbox-v2:{instance}\n")
+    (directory / "monitor.json").write_text(json.dumps(context))
+
+
+if __name__ == "__main__":
+    try:
+        directory = Path("/run/workspace")
+        prepare(directory, os.environ)
+        subprocess.run([
+            "/usr/bin/openssl", "req", "-new", "-x509", "-days", "365",
+            "-key", str(directory / "host_key"), "-out", str(directory / "host_key.crt"),
+            "-subj", "/CN=sandbox.invalid", "-addext", "subjectAltName=DNS:sandbox.invalid",
+            "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=digitalSignature",
+            "-addext", "extendedKeyUsage=serverAuth",
+        ], check=True)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+        sys.exit(f"workspace-keys: {error}")

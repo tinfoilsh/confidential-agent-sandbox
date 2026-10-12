@@ -1,7 +1,6 @@
 [Unit]
 Description=Monitor SSH tunnel and transparent routing
-Requires=monitor-configure.service
-After=network.target monitor-configure.service
+After=network.target
 StartLimitIntervalSec=0
 
 [Service]

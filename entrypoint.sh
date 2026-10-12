@@ -11,16 +11,14 @@ install -d -m 0711 "$credentials"
 install -m 0600 /run/tinfoil/keys/host-ssh/private_key.pem "$credentials/host_key"
 ssh-keygen -y -f "$credentials/host_key" > "$credentials/host_key.pub"
 # Login authority comes only from the measured key, including on an existing disk.
-/usr/local/libexec/workspace-enroll --owner-key > "$credentials/authorized_keys"
-chmod 0644 "$credentials/authorized_keys"
+/usr/local/libexec/workspace-keys
 # Public launch configuration lets the owner reach this boot before unlocking it.
-install -d -m 0750 -g sandbox /run/monitor
-RUNTIME_DIRECTORY=/run/monitor /usr/local/libexec/monitor-configure --boot
 (
     child=
     trap '[[ -z "$child" ]] || kill "$child" 2>/dev/null; exit 0' TERM INT
     while true; do
-        /usr/bin/ssh -NT -F /etc/ssh/monitor-reverse.conf -l "$SANDBOX_OWNER_PUBLIC_KEY" monitor &
+        [[ -s "$credentials/monitor-bootstrap.conf" ]] || { sleep 2; continue; }
+        /usr/bin/ssh -NT -F /etc/ssh/monitor-reverse.conf monitor &
         child=$!
         wait "$child" || true
         sleep 2 &
@@ -30,23 +28,27 @@ RUNTIME_DIRECTORY=/run/monitor /usr/local/libexec/monitor-configure --boot
 ) &
 reverse=$!
 bootstrap_ssh=
-trap 'kill "$reverse" ${bootstrap_ssh:+"$bootstrap_ssh"} 2>/dev/null; wait || true' EXIT
+attestation=
+trap 'kill "$reverse" ${bootstrap_ssh:+"$bootstrap_ssh"} ${attestation:+"$attestation"} 2>/dev/null; wait || true' EXIT
 if [[ -S /run/tinfoil/volumes/workspace/control.sock ]]; then
     install -d -m 0755 /run/sshd
     /usr/sbin/sshd -D -e -f /etc/ssh/sshd-unlock.conf &
     bootstrap_ssh=$!
-    /usr/local/libexec/workspace-enroll
+    /usr/local/libexec/workspace-attestation &
+    attestation=$!
+    until [[ $(head -n1 "$disk/.enrollment" 2>/dev/null) == "$(<"$credentials/host_key.pub")" ]]; do
+        kill -0 "$bootstrap_ssh" "$attestation"
+        sleep 0.2
+    done
+    # The receipt appears before the helper's final sync; wait for it to finish.
+    flock "$credentials/unlock.lock" true
     kill "$bootstrap_ssh"
     wait "$bootstrap_ssh" || true
     bootstrap_ssh=
 fi
-kill "$reverse"
-wait "$reverse" || true
-trap - EXIT
 # Without the socket the disk opened earlier this boot; an enrollment that crashed after the unlock needs a new boot.
 [[ $(head -n1 "$disk/.enrollment") == "$(<"$credentials/host_key.pub")" ]] || { echo "this boot's enrollment did not finish; restart the sandbox" >&2; exit 1; }
 # The login key is already fixed; only the agent secret comes from the disk.
-install -m 0600 "$disk/.monitor.identity" "$credentials/monitor.identity"
 # The pack names its closure without the hash here, which is what nix.conf reads.
 install -d /nix/var/nix/profiles /nix/var/nix/daemon-socket
 ln -sfn /tinfoil/models/nix/nix/var/nix/profiles/default /nix/var/nix/profiles/default
@@ -78,4 +80,7 @@ rm -f /etc/monitor/route.json /etc/ssh/ssh_config.d/monitor-route.conf
 printf 'nameserver 100.127.255.2\noptions timeout:1 attempts:2\n' > /etc/resolv.conf
 # Leave device management with the CVM, while its cgroup submount stays writable.
 mount -o remount,bind,ro /sys
+kill "$reverse" ${attestation:+"$attestation"}
+wait || true
+trap - EXIT
 exec /sbin/init
