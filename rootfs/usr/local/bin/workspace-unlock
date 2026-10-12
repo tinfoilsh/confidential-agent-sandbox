@@ -43,6 +43,35 @@ def control(operation, key):
         return connection.recv(256)
 
 
+def activate_workspace(key, initialize):
+    if not Path(CONTROL).exists() and DISK.is_mount():
+        return
+    operation = b"i" if initialize else b"u"
+    status = control(operation, key)
+    # The worker rejects initialization of a nonblank disk. A retry can unlock
+    # that disk with the same key, including after a lost initialization reply.
+    if initialize and status == b"rejected":
+        operation, status = b"u", control(b"u", key)
+    if status == b"ok":
+        return
+    action = "initialization" if operation == b"i" else "unlock"
+    if status == b"rejected":
+        raise ValueError(f"workspace {action} request rejected by the volume worker")
+    if status == b"failed":
+        raise ValueError(f"workspace {action} failed in the volume worker; check its logs")
+    raise ValueError("unexpected volume worker response")
+
+
+def check_ssh_key(data, description, *arguments):
+    with tempfile.NamedTemporaryFile(dir=RUNTIME) as temporary:
+        temporary.write(data)
+        temporary.flush()
+        result = subprocess.run(["/usr/bin/ssh-keygen", *arguments, "-f", temporary.name],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode:
+            raise ValueError(f"invalid {description}")
+
+
 def monitor_route(route):
     context = json.loads((RUNTIME / "monitor.json").read_text())
     if (not isinstance(route, dict) or set(route) != {"binding", "host_key"}
@@ -51,11 +80,7 @@ def monitor_route(route):
     key = route["host_key"]
     if not isinstance(key, str) or "\n" in key or "\r" in key:
         raise ValueError("invalid Monitor host key")
-    with tempfile.NamedTemporaryFile(dir=RUNTIME) as temporary:
-        temporary.write((key + "\n").encode())
-        temporary.flush()
-        subprocess.run(["/usr/bin/ssh-keygen", "-l", "-f", temporary.name],
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    check_ssh_key((key + "\n").encode(), "Monitor host key", "-l")
     return {**context, "host_key": key}
 
 
@@ -115,18 +140,13 @@ def open_workspace(request, boot):
     if len(key) != 32:
         raise ValueError("volume must encode a 32-byte workspace key")
     identity = request["monitor_identity"].encode()
-    with tempfile.NamedTemporaryFile(dir=RUNTIME) as temporary:
-        temporary.write(identity)
-        temporary.flush()
-        result = subprocess.run(["/usr/bin/ssh-keygen", "-y", "-P", "", "-f", temporary.name],
-                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if result.returncode:
-            raise ValueError("invalid Monitor agent identity")
+    check_ssh_key(identity, "Monitor agent identity", "-y", "-P", "")
 
     receipt = boot + hashlib.sha256(key + identity).hexdigest().encode() + b"\n"
     sealed = DISK / ".enrollment"
-    if sealed.exists() and sealed.read_bytes().startswith(boot):
-        if not hmac.compare_digest(sealed.read_bytes(), receipt):
+    previous = sealed.read_bytes() if sealed.exists() else b""
+    if previous.startswith(boot):
+        if not hmac.compare_digest(previous, receipt):
             raise ValueError("workspace was unlocked with different credentials")
         return receipt
     opened = RUNTIME / "unlock.opened"
@@ -138,12 +158,11 @@ def open_workspace(request, boot):
         if intent.exists() and not hmac.compare_digest(intent.read_bytes(), receipt):
             raise ValueError("another unlock request is pending")
         save(intent, receipt)
-        status = b"ok" if not Path(CONTROL).exists() and DISK.is_mount() else control(b"u", key)
-        if status == b"rejected" and request["operation"] == "initialize":
-            status = control(b"i", key)
-        if status != b"ok":
+        try:
+            activate_workspace(key, request["operation"] == "initialize")
+        except ValueError:
             intent.unlink(missing_ok=True)
-            raise ValueError("workspace key refused")
+            raise
         if not DISK.is_mount():
             raise ValueError("volume worker did not mount the workspace")
         # Preserve partial progress across script exits, until this container stops.

@@ -95,7 +95,7 @@ class RouteTests(unittest.TestCase):
                    'monitor_identity': self.key_path.read_text()}
         boot = (self.public + '\n').encode()
         with patch.object(self.unlock, 'control', return_value=b'rejected') as worker:
-            with self.assertRaisesRegex(ValueError, 'workspace key refused'):
+            with self.assertRaisesRegex(ValueError, 'workspace unlock request rejected'):
                 self.unlock.open_workspace(request, boot)
             self.assertEqual([call.args[0] for call in worker.call_args_list], [b'u'])
         self.assertFalse((self.unlock.RUNTIME / 'unlock.intent').exists())
@@ -105,12 +105,101 @@ class RouteTests(unittest.TestCase):
         with patch.object(self.unlock, 'control', side_effect=[b'rejected', b'ok']) as worker, \
              patch.object(Path, 'is_mount', return_value=True):
             receipt = self.unlock.open_workspace(request, boot)
-            self.assertEqual([call.args[0] for call in worker.call_args_list], [b'u', b'i'])
+            self.assertEqual([call.args[0] for call in worker.call_args_list], [b'i', b'u'])
         with patch.object(self.unlock, 'control', side_effect=AssertionError('retried volume worker')):
             self.assertEqual(self.unlock.open_workspace(request, boot), receipt)
             request['volume'] = base64.b64encode(bytes(32)).decode()
             with self.assertRaisesRegex(ValueError, 'another unlock'):
                 self.unlock.open_workspace(request, boot)
+
+    def test_initialization_handles_a_blank_disk_without_an_encryption_header(self):
+        request = {'operation': 'initialize', 'volume': base64.b64encode(bytes(range(32))).decode(),
+                   'monitor_identity': self.key_path.read_text()}
+        self.unlock.CONTROL = str(self.key_path)
+        # Match the worker: unlocking a blank disk fails; initializing it works.
+        def response(operation, _key):
+            return b'ok' if operation == b'i' else b'failed'
+        with patch.object(self.unlock, 'control', side_effect=response) as worker, \
+             patch.object(Path, 'is_mount', return_value=True):
+            self.unlock.open_workspace(request, (self.public + '\n').encode())
+        self.assertEqual([call.args[0] for call in worker.call_args_list], [b'i'])
+        self.assertTrue((self.unlock.DISK / '.monitor.identity').exists())
+
+    def test_failed_unlock_of_existing_workspace_does_not_initialize(self):
+        request = {'operation': 'unlock', 'volume': base64.b64encode(bytes(range(32))).decode(),
+                   'monitor_identity': self.key_path.read_text()}
+        self.unlock.CONTROL = str(self.key_path)
+        with patch.object(self.unlock, 'control', return_value=b'failed') as worker:
+            with self.assertRaisesRegex(ValueError, 'workspace unlock failed in the volume worker'):
+                self.unlock.open_workspace(request, (self.public + '\n').encode())
+        self.assertEqual([call.args[0] for call in worker.call_args_list], [b'u'])
+        self.assertFalse((self.unlock.RUNTIME / 'unlock.intent').exists())
+
+    def test_initialization_preserves_the_workers_nonblank_disk_rejection(self):
+        request = {'operation': 'initialize', 'volume': base64.b64encode(bytes(range(32))).decode(),
+                   'monitor_identity': self.key_path.read_text()}
+        self.unlock.CONTROL = str(self.key_path)
+        with patch.object(self.unlock, 'control', side_effect=[b'rejected', b'failed']) as worker:
+            with self.assertRaisesRegex(ValueError, 'workspace unlock failed in the volume worker'):
+                self.unlock.open_workspace(request, (self.public + '\n').encode())
+        self.assertEqual([call.args[0] for call in worker.call_args_list], [b'i', b'u'])
+        self.assertFalse((self.unlock.RUNTIME / 'unlock.opened').exists())
+        self.assertFalse((self.unlock.DISK / '.monitor.identity').exists())
+
+    def test_initialization_worker_failure_is_reported_without_another_operation(self):
+        request = {'operation': 'initialize', 'volume': base64.b64encode(bytes(range(32))).decode(),
+                   'monitor_identity': self.key_path.read_text()}
+        self.unlock.CONTROL = str(self.key_path)
+        with patch.object(self.unlock, 'control', return_value=b'failed') as worker:
+            with self.assertRaisesRegex(ValueError, 'workspace initialization failed in the volume worker'):
+                self.unlock.open_workspace(request, (self.public + '\n').encode())
+        self.assertEqual([call.args[0] for call in worker.call_args_list], [b'i'])
+        self.assertFalse((self.unlock.RUNTIME / 'unlock.intent').exists())
+
+    def test_lost_worker_reply_keeps_credentials_fixed_until_mount_is_confirmed(self):
+        request = {'operation': 'initialize', 'volume': base64.b64encode(bytes(range(32))).decode(),
+                   'monitor_identity': self.key_path.read_text()}
+        boot = (self.public + '\n').encode()
+        self.unlock.CONTROL = str(self.key_path)
+        with patch.object(self.unlock, 'control', side_effect=OSError('reply lost')):
+            with self.assertRaisesRegex(OSError, 'reply lost'):
+                self.unlock.open_workspace(request, boot)
+        self.assertTrue((self.unlock.RUNTIME / 'unlock.intent').exists())
+        with patch.object(self.unlock, 'control', side_effect=AssertionError('changed credentials reached worker')):
+            with self.assertRaisesRegex(ValueError, 'another unlock request is pending'):
+                self.unlock.open_workspace({**request, 'volume': base64.b64encode(bytes(32)).decode()}, boot)
+        self.unlock.CONTROL = str(self.directory / 'removed.sock')
+        with patch.object(Path, 'is_mount', return_value=True), \
+             patch.object(self.unlock, 'control', side_effect=AssertionError('retried completed worker')):
+            self.unlock.open_workspace(request, boot)
+        self.assertTrue((self.unlock.RUNTIME / 'unlock.opened').exists())
+
+    def test_interrupted_identity_write_resumes_without_reopening_volume(self):
+        request = {'operation': 'initialize', 'volume': base64.b64encode(bytes(range(32))).decode(),
+                   'monitor_identity': self.key_path.read_text()}
+        boot = (self.public + '\n').encode()
+        self.unlock.CONTROL = str(self.key_path)
+        save = self.unlock.save
+        def interrupted(path, data):
+            if path == self.unlock.DISK / '.monitor.identity':
+                raise OSError('write interrupted')
+            save(path, data)
+        with patch.object(self.unlock, 'control', return_value=b'ok'), \
+             patch.object(Path, 'is_mount', return_value=True), \
+             patch.object(self.unlock, 'save', side_effect=interrupted):
+            with self.assertRaisesRegex(OSError, 'write interrupted'):
+                self.unlock.open_workspace(request, boot)
+        with patch.object(self.unlock, 'control', side_effect=AssertionError('retried completed worker')):
+            self.unlock.open_workspace(request, boot)
+        self.assertEqual((self.unlock.DISK / '.monitor.identity').read_text(), request['monitor_identity'])
+
+    def test_invalid_agent_identity_never_reaches_volume_worker(self):
+        request = {'operation': 'initialize', 'volume': base64.b64encode(bytes(range(32))).decode(),
+                   'monitor_identity': 'not a private key'}
+        with patch.object(self.unlock, 'control', side_effect=AssertionError('invalid identity reached worker')):
+            with self.assertRaisesRegex(ValueError, 'invalid Monitor agent identity'):
+                self.unlock.open_workspace(request, (self.public + '\n').encode())
+        self.assertFalse((self.unlock.RUNTIME / 'unlock.intent').exists())
 
     def test_only_bootstrap_is_permissive_and_only_fixed_ports_are_published(self):
         self.keys.prepare(self.unlock.RUNTIME, {**self.environment, 'MONITOR_ENDPOINT': '100.64.0.1:2222'})
