@@ -5,7 +5,7 @@ StartLimitIntervalSec=0
 
 [Service]
 # Root's SSH client requires a private copy of the identity shared with sandbox.
-LoadCredential=identity:/run/monitor/identity
+ExecStartPre=/usr/bin/install -m 0600 /run/monitor/identity /run/monitor/network.identity
 ExecStart=/usr/local/bin/monitor --ssh-config /etc/ssh/monitor-network.conf network
 Restart=always
 RestartSec=5s
