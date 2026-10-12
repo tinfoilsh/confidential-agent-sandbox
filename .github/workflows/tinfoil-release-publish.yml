@@ -57,11 +57,9 @@ jobs:
         run: |
           sha256sum tinfoil-config.yml > tinfoil-config.sha256
           cat > release-notes.md <<'NOTES'
-          Confidential Agent Sandbox with a measured owner SSH login key, an encrypted workspace unlocked over attested SSH, and a required Monitor route fixed at boot. The image and RC3 IGVM runtime are pinned in the attached template.
+          Create sandboxes in the dashboard, then run `tinfoil attest-ssh NAME --install` and `ssh NAME`. Rerun attestation after either VM reboots.
 
-          Use the matching owner-SSH CLI build and run `tinfoil sandbox create NAME --monitor MONITOR --tag TAG` in an organization with sandboxes enabled. Then connect with `ssh NAME`. This release replaces signed HTTP enrollment; earlier enrollment clients are not compatible.
-
-          Each sandbox binds its owner key and workspace into a separate config registry revision. Clients verify that rendered configuration and the attested runtime before sending keys. This release attests the template's provenance; it does not claim a fixed launch measurement for the unbound template.
+          Requires the matching dashboard-provisioning CLI and Monitor releases. The attached template pins the image and runtime and carries provenance attestation. Live CVM provisioning remains untested.
           NOTES
           release_flags=(--latest)
           if [[ "$VERSION" == *-* ]]; then
