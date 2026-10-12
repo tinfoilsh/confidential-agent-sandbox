@@ -1,12 +1,11 @@
 #!/usr/bin/python3 -I
-"""Prepare the measured owner login key and the boot key's TLS certificate."""
+"""Prepare the measured owner login key and Monitor bootstrap route."""
 
 import base64
 import ipaddress
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import uuid
 
@@ -49,12 +48,5 @@ if __name__ == "__main__":
     try:
         directory = Path("/run/workspace")
         prepare(directory, os.environ)
-        subprocess.run([
-            "/usr/bin/openssl", "req", "-new", "-x509", "-days", "365",
-            "-key", str(directory / "host_key"), "-out", str(directory / "host_key.crt"),
-            "-subj", "/CN=sandbox.invalid", "-addext", "subjectAltName=DNS:sandbox.invalid",
-            "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=digitalSignature",
-            "-addext", "extendedKeyUsage=serverAuth",
-        ], check=True)
-    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, KeyError, TypeError) as error:
         sys.exit(f"workspace-keys: {error}")

@@ -1,9 +1,8 @@
-// Command workspace-attestation serves health and attestation using the boot key.
+// Command workspace-attestation serves health and public attestation documents.
 package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"log"
 	"net/http"
@@ -12,8 +11,6 @@ import (
 	"syscall"
 	"time"
 )
-
-const hostKey = "/run/workspace/host_key"
 
 func main() {
 	if err := run(); err != nil {
@@ -30,7 +27,6 @@ func run() error {
 	routeServer := &http.Server{
 		Addr: "127.0.0.1:8443", Handler: routeHandler(local),
 		ReadHeaderTimeout: 10 * time.Second,
-		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS13},
 	}
 	defer routeServer.Close()
 	server := &http.Server{
@@ -41,7 +37,7 @@ func run() error {
 	defer server.Close()
 	served := make(chan error, 2)
 	go func() { served <- server.ListenAndServe() }()
-	go func() { served <- routeServer.ListenAndServeTLS(hostKey+".crt", hostKey) }()
+	go func() { served <- routeServer.ListenAndServe() }()
 	log.Print("workspace attestation service listening")
 	select {
 	case err := <-served:

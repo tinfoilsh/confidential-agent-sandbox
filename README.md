@@ -21,6 +21,10 @@ before releasing disk or agent keys and installs Monitor's current attested key
 for application traffic. Only bootstrap skips Monitor host-key checks; application
 SSH and native ProxyJump remain strictly pinned.
 
+The fixed attestation relay port carries HTTP with only a public nonce and signed
+evidence. The CLI verifies that evidence, then pins its endorsed key for SSH.
+Attestation needs no separate TLS certificate; secrets travel only over pinned SSH.
+
 `SANDBOX_OWNER_PUBLIC_KEY`, `SANDBOX_INSTANCE_ID` and `MONITOR_BINDING` are measured.
 The binding contains Monitor's container UUID and owner public key. The optional
 runtime `MONITOR_ENDPOINT` is an IPv4:port locator. Omit it from create variables;

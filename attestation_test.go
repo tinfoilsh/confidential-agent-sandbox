@@ -33,7 +33,7 @@ func TestRouteAttestationUsesLocalSocket(t *testing.T) {
 	defer localServer.Close()
 	local := attestationClient(socket)
 	defer local.CloseIdleConnections()
-	server := httptest.NewTLSServer(routeHandler(local))
+	server := httptest.NewServer(routeHandler(local))
 	defer server.Close()
 	request, _ := http.NewRequest(http.MethodGet, server.URL+attestationPath+"?nonce="+nonce, nil)
 	request.Header.Set("Authorization", "Bearer owner-permit")
