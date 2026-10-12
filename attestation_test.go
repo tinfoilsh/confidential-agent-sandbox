@@ -1,50 +1,18 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/pem"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"testing"
 )
 
-// Exercise the socket and TLS boundaries together: the adapter must return the
-// socket's document for this nonce, using the boot key, without forwarding owner
-// credentials or exposing other shim endpoints.
-func TestRouteAttestationUsesLocalSocketAndBootKey(t *testing.T) {
+// The adapter returns only the attestation socket's document for this nonce,
+// without forwarding owner credentials or exposing other shim endpoints.
+func TestRouteAttestationUsesLocalSocket(t *testing.T) {
 	dir := t.TempDir()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, "boot.pem")
-	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0600); err != nil {
-		t.Fatal(err)
-	}
-	certificate, err := enrollmentCertificate(path, "work.example")
-	if err != nil {
-		t.Fatal(err)
-	}
-	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !key.PublicKey.Equal(leaf.PublicKey) {
-		t.Fatal("TLS uses a key other than the attested boot key")
-	}
-
 	socket := filepath.Join(dir, "attestation.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
@@ -65,12 +33,8 @@ func TestRouteAttestationUsesLocalSocketAndBootKey(t *testing.T) {
 	defer localServer.Close()
 	local := attestationClient(socket)
 	defer local.CloseIdleConnections()
-	box := &sandbox{}
-	server := httptest.NewUnstartedServer(box.routeHandler(local))
-	server.TLS = &tls.Config{Certificates: []tls.Certificate{certificate}}
-	server.StartTLS()
+	server := httptest.NewServer(routeHandler(local))
 	defer server.Close()
-	server.Client().Transport.(*http.Transport).TLSClientConfig.ServerName = "work.example"
 	request, _ := http.NewRequest(http.MethodGet, server.URL+attestationPath+"?nonce="+nonce, nil)
 	request.Header.Set("Authorization", "Bearer owner-permit")
 	response, err := server.Client().Do(request)

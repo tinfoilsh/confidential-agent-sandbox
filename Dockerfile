@@ -7,10 +7,10 @@
 ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
 
 FROM golang:1.26-alpine@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468 AS build
-COPY go.mod go.sum *.go /src/
+COPY go.mod *.go /src/
 WORKDIR /src
 RUN go test ./...
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' -o /workspace-enroll .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' -o /workspace-attestation .
 
 FROM ${BASE_IMAGE}
 ENV container=docker LANG=en_US.UTF-8
@@ -82,18 +82,19 @@ RUN curl -fsSL --retry 3 "https://github.com/SagerNet/sing-box/releases/download
 
 COPY --chmod=0755 entrypoint.sh /entrypoint
 COPY rootfs/ /
-COPY --from=build /workspace-enroll /usr/local/libexec/workspace-enroll
+COPY --from=build /workspace-attestation /usr/local/libexec/workspace-attestation
 RUN chmod 0440 /etc/sudoers.d/90-sandbox \
-    && chmod 0755 /usr/local/bin/monitor /usr/local/libexec/seed-agent-skills /usr/local/libexec/monitor-configure \
+    && chmod 0755 /usr/local/libexec/workspace-keys /usr/local/bin/workspace-unlock /usr/local/bin/monitor /usr/local/libexec/seed-agent-skills \
     && for script in /entrypoint /healthcheck.sh /usr/local/libexec/seed-agent-skills /etc/profile.d/zz-monitor.sh; do \
          bash -n "$script" || exit 1; \
        done \
     && /usr/local/bin/monitor run --help > /dev/null \
     && /usr/local/bin/monitor mcp serve --help > /dev/null \
-    && /usr/local/bin/monitor network --help > /dev/null
+    && /usr/local/bin/monitor network --help > /dev/null \
+    && ln -s ../bin/workspace-unlock /usr/local/libexec/workspace-enroll
 
 RUN systemctl disable ssh.socket \
-    && systemctl enable ssh.service docker.service cron.service monitor-network.service monitor-reverse.service workspace-enroll.service \
+    && systemctl enable ssh.service docker.service cron.service monitor-network.service monitor-reverse.service workspace-attestation.service \
     # The units resolve once the entrypoint links the pack's profile, so systemctl cannot enable them here.
     && ln -s /nix/var/nix/profiles/default/lib/systemd/system/nix-daemon.service \
          /nix/var/nix/profiles/default/lib/systemd/system/nix-daemon.socket /etc/systemd/system/ \

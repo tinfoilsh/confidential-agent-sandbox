@@ -56,10 +56,12 @@ containers:
       - '22:22'
 
     env:
-      # The CLI supplies the owner public key in the measured configuration.
+      # The dashboard supplies public owner and resource bindings.
       - SANDBOX_OWNER_PUBLIC_KEY: ""
-      # Public endpoint and attested host key, available before disk unlock.
-      - MONITOR_ROUTE: ""
+      - SANDBOX_INSTANCE_ID: ""
+      - MONITOR_BINDING: ""
+      # An untrusted locator, supplied only on deploy, never on create.
+      - MONITOR_ENDPOINT
 
     tmpfs:
       /run: "rw,nosuid,nodev,mode=755"

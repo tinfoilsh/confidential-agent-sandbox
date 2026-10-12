@@ -1,0 +1,12 @@
+[Unit]
+Description=Sandbox attestation and health
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/local/libexec/workspace-attestation
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
