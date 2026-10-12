@@ -1,11 +1,12 @@
 [Unit]
-Description=Configure Monitor from owner enrollment
+Description=Configure measured Monitor route and enrolled identity
 
 [Service]
 Type=oneshot
+PassEnvironment=MONITOR_ROUTE
 RemainAfterExit=yes
 Group=sandbox
 RuntimeDirectory=monitor
 RuntimeDirectoryMode=0750
 UMask=0027
-ExecStart=/usr/local/libexec/monitor-configure /run/workspace/monitor.json
+ExecStart=/usr/local/libexec/monitor-configure /run/workspace/monitor.identity
