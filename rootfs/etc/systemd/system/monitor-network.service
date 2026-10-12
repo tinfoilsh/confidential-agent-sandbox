@@ -3,8 +3,6 @@ Description=Monitor SSH tunnel and transparent routing
 Requires=monitor-configure.service
 After=network.target monitor-configure.service
 StartLimitIntervalSec=0
-# An uncontained sandbox enrolls without a Monitor and keeps the container's DNS.
-ConditionPathExists=/run/monitor/route.json
 
 [Service]
 # Root's SSH client requires a private copy of the identity shared with sandbox.

@@ -1,5 +1,5 @@
 # An Ubuntu workspace with measured CVM-wide administrator access. Connect with
-# native SSH through Monitor after attested enrollment.
+# native SSH through Monitor after attested disk unlock.
 # Restricted egress requires tinfoild v0.8.19 or newer.
 cvm-version: 0.15.1-rc.3@sha256:e1c8d17c7d79663c365169a796eec06116f483825028fad5faddfe9839321217
 # cpus: 32
@@ -20,7 +20,7 @@ attested-keys:
 volumes:
   - name: workspace
     size: 30GiB
-    # Persistent encrypted disk, opened by the volume key an enrollment spends.
+    # Persistent encrypted disk, opened by the volume key sent over owner SSH.
     exec: true
     # The pack is read-only, so a writable store is the volume layered over it.
     overlays:
@@ -42,6 +42,7 @@ containers:
     # gpus: all
     restart: on-failure
     cvm_admin: true
+    attestation: true
     stop_signal: SIGRTMIN+3
     stop_timeout: 120
     networks: [dev]
@@ -49,19 +50,16 @@ containers:
     models: [nix]
     persistent_volumes: [workspace:/mnt/disk, workspace:/nix]
 
-    # A contained sandbox publishes sshd through its reverse connection. 22 lands
-    # on the CVM's loopback for the shim's CONNECT tunnel, which reaches an
-    # uncontained one; sshd accepts publickey against the enrolled key only.
+    # Native SSH is also published through the Monitor reverse connection.
+    # sshd accepts only the measured owner public key.
     ports:
       - '22:22'
 
     env:
-      # Per launch, from the unmeasured external config tinfoild writes.
-      - DOMAIN
-      # New launches bind a salted Argon2id owner commitment. SHA-256 is for
-      # existing generated credentials. Exactly one binding must be supplied.
-      - SANDBOX_OWNER_KEY_ARGON2ID=
-      - SANDBOX_OWNER_KEY_SHA256=
+      # The CLI supplies the owner public key in the measured configuration.
+      - SANDBOX_OWNER_PUBLIC_KEY: ""
+      # Public endpoint and attested host key, available before disk unlock.
+      - MONITOR_ROUTE: ""
 
     tmpfs:
       /run: "rw,nosuid,nodev,mode=755"
@@ -78,5 +76,4 @@ shim:
   upstream-port: 8080
   authenticated: false
   paths:
-    - /enroll
     - /healthz

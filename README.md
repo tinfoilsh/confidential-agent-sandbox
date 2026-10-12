@@ -7,40 +7,52 @@ Docker daemon, and an encrypted disk that keeps your files between sessions.
 
 ```sh
 tinfoil monitor create personal
-tinfoil sandbox create work --monitor personal --ssh
+tinfoil sandbox create work --monitor personal
 ssh work
 ```
 
-Supply a workspace passphrase or reuse a saved workspace key. Passphrases are
-16 to 4096 UTF-8 bytes; spaces and newlines are part of the secret. The dashboard
-and CLI bind a salted Argon2id commitment into the measured boot config as
-`SANDBOX_OWNER_KEY_ARGON2ID`. Enrollment verifies it before sending the unchanged
-secret to RC3's Argon2id volume worker. Clients verify that config and the shim's
-attested TLS key before sending the secret. Starts and restarts keep the binding.
+The CLI generates independent owner and disk keys. It binds
+`SANDBOX_OWNER_PUBLIC_KEY` in the measured config; OpenSSH uses that exact key
+for both disk unlock and login. Use the same computer for later commands;
+credentials stay in `~/.tinfoil/sandboxes/<name>`. The dashboard provides the CLI
+command.
 
-The commitment uses standard PHC encoding with Argon2id v19, 256 MiB memory,
-three passes, four lanes, a random 32-byte salt, and a 32-byte verifier. The disk
-uses its own independent salt. Existing 64-byte generated credentials and their
-`SANDBOX_OWNER_KEY_SHA256` bindings still work. Exactly one owner binding must be
-set. Base64 is only the enrollment transport encoding; passphrases need no
-special encoding.
+For a stopped sandbox or a boot started from the dashboard, run
+`tinfoil sandbox start work` to unlock it and install the attested SSH profile.
+Connect with `ssh work`; use `tinfoil sandbox enroll work` to retry unlock.
 
-Enrollment and attestation use the shim's TLS endpoint on port 443. The shim
-forwards `/enroll` to the workspace's internal HTTP server on port 8080.
-The workspace's `/healthz` endpoint returns an empty readiness response.
+The sandbox boots with `MONITOR_ROUTE`, a JSON object containing the Monitor's
+public domain, sandbox-facing IPv4 address, SSH port and attested host key. It
+starts reverse SSH before disk unlock. The device needs Monitor route access;
+the sandbox's publishing key needs no account grant.
 
-With `--monitor`,
-workload traffic goes through Monitor. Without it, the sandbox has ordinary
-network egress. Private enrollment preserves the shim's TLS; reverse SSH starts after
-enrollment supplies Monitor configuration. The control plane permits the sandbox to reach its assigned Monitor, including
-when they run on separate hosts.
-Keep the keys in `~/.tinfoil/sandboxes/<name>` to reopen its disk.
+Virtual port 443 reaches the sandbox's loopback HTTPS server on port 8443.
+Its TLS certificate uses the attested boot key. It proxies attestation requests
+to `/tinfoil/attestation.sock`. Public HTTP serves health only.
+
+After verifying fresh attestation, the CLI connects to virtual port 22 with the
+owner key and pins the sandbox's attested SSH host key. Before disk unlock,
+OpenSSH permits only `workspace-enroll --unlock`, with no shell, PTY or
+forwarding. The helper sends the disk key and Monitor agent identity through a
+private Unix socket to the root unlock service. That service opens the volume
+and saves the agent identity. It accepts no login key or route.
+After the disk is mounted, normal SSH starts with the same owner key. Identical
+unlock retries are safe, including after the daemon handoff. There is no custom
+owner challenge or signed HTTP enrollment.
+
+The controlplane restricts egress to the assigned Monitor; the measured boot
+address must match that allowed endpoint.
 
 Home directories, `/workspace`, Docker state, and installed packages stay on the
 disk. Packages are kept per image build, so an updated image starts without them.
 Everything else is reset when the sandbox is recreated.
 
-After enrollment and mounting, `monitor-configure.service` writes this boot's
+After unlock and mounting, `monitor-configure.service` writes this boot's
 Monitor configuration under `/run/monitor`. The network and reverse SSH services
-wait for it and stay off when enrollment has no Monitor. Systemd supervises the
-reverse SSH connection directly and restarts it after disconnects.
+wait for it. Routing always comes from measured `MONITOR_ROUTE`; only the agent
+identity comes from the disk. Systemd takes over the reverse SSH connection and
+restarts it after disconnects. Its SSH username is the measured owner public
+key, allowing Monitor to locate the attestation route before the device knows
+the boot key. No runtime `DOMAIN` is needed. Environment entries are literal
+mappings, including empty template defaults; provisioning must fill them before
+publishing the measured config.

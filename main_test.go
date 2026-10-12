@@ -2,51 +2,64 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
+	"golang.org/x/crypto/ssh"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestEnrollmentHandlerLeavesAttestationToShim(t *testing.T) {
+func TestPublicHTTPHasNoUnlockOrEnrollment(t *testing.T) {
 	box := &sandbox{}
-	for _, path := range []string{"/healthz", "/.well-known/tinfoil-attestation", "/.well-known/tinfoil-certificate", "/bootstrap"} {
+	for _, path := range []string{"/healthz", "/unlock", "/enroll", "/owner/challenge", "/.well-known/tinfoil-attestation"} {
 		rec := httptest.NewRecorder()
-		box.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		box.handler().ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		expected := http.StatusNotFound
 		if path == "/healthz" {
-			if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
-				t.Fatalf("readiness response: %d %s", rec.Code, rec.Body.String())
-			}
-		} else if rec.Code != http.StatusNotFound {
-			t.Fatalf("unexpected endpoint %s: %d", path, rec.Code)
+			expected = http.StatusNoContent
+		}
+		if rec.Code != expected {
+			t.Fatalf("%s: %d", path, rec.Code)
+		}
+	}
+	for _, path := range []string{"/unlock", "/enroll"} {
+		rec := httptest.NewRecorder()
+		box.handler().ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(`{"volume":"secret"}`)))
+		if rec.Code != http.StatusNotFound {
+			t.Fatal("public unlock exposed")
 		}
 	}
 }
 
-// A sandbox on its Monitor's host reaches Monitor at the bridge gateway.
-var testRoute = monitorRoute{Domain: "personal.example", IP: "100.64.0.1", Port: 18293, HostKey: "ssh-ed25519 AAAA"}
-
-// testSandbox binds a workspace key before serving enrollment requests.
-func testSandbox(t *testing.T) (*sandbox, []byte, func(path string, body any) int) {
+func testIdentity(t *testing.T) string {
 	t.Helper()
-	volume := make([]byte, volumeKeyBytes)
-	if _, err := rand.Read(volume); err != nil {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
 		t.Fatal(err)
 	}
-	ownerHash := sha256.Sum256(volume)
-	box := &sandbox{domain: "work.example", owner: &ownerCommitment{hash: ownerHash[:]}, sshKey: "ecdsa-sha2-nistp256 BOOT", done: func() {}}
-	return box, volume, func(path string, body any) int {
+	block, err := ssh.MarshalPrivateKey(key, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(block))
+}
+
+func testSandbox(t *testing.T) (*sandbox, []byte, func(any) int) {
+	t.Helper()
+	volume := bytes.Repeat([]byte{7}, volumeKeyBytes)
+	box := &sandbox{sshKey: "ecdsa-sha2-nistp256 BOOT", done: func() {}}
+	return box, volume, func(body any) int {
 		data, _ := json.Marshal(body)
-		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(data))
 		rec := httptest.NewRecorder()
-		box.handler().ServeHTTP(rec, req)
+		box.unlockHandler().ServeHTTP(rec, httptest.NewRequest("POST", "/unlock", bytes.NewReader(data)))
 		return rec.Code
 	}
 }
@@ -79,7 +92,7 @@ func testVolume(t *testing.T, expected ...[]byte) (unlocked string) {
 			return
 		}
 		defer connection.Close()
-		packet := make([]byte, 2+maxVolumeKeyBytes+1)
+		packet := make([]byte, 2+volumeKeyBytes+1)
 		n, _ := connection.Read(packet)
 		valid := n == 2+volumeKeyBytes
 		if len(expected) > 0 {
@@ -105,126 +118,115 @@ func testDevice(t *testing.T, path string) uint64 {
 	return dev
 }
 
-func TestEnrollmentResumesAfterTheUnlockAndRestart(t *testing.T) {
+func TestUnlockResumesAfterPartialFailureAndRestart(t *testing.T) {
 	box, volume, call := testSandbox(t)
-	unlocked := testVolume(t)
-	login := func() string {
-		blob := binary.BigEndian.AppendUint32(nil, 11)
-		blob = append(blob, "ssh-ed25519"...)
-		blob = binary.BigEndian.AppendUint32(blob, 32)
-		key := make([]byte, 32)
-		rand.Read(key)
-		return "ssh-ed25519 " + base64.StdEncoding.EncodeToString(append(blob, key...))
+	unlocked := testVolume(t, volume)
+	identity := testIdentity(t)
+	request := func(volume []byte, identity string) int {
+		return call(map[string]any{"volume": volume, "monitor_identity": identity})
 	}
-	key, route := login(), testRoute
-	route.Identity = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
-	enroll := func(key string, volume []byte, route monitorRoute) int {
-		return call("/enroll", map[string]any{"key": key, "volume": base64.StdEncoding.EncodeToString(volume), "monitor": route})
-	}
-	wrongVolume := bytes.Clone(volume)
-	wrongVolume[0] ^= 1
-
-	// Even a fresh disk must reject a key other than the boot-bound owner's.
-	if code := enroll(key, wrongVolume, route); code != http.StatusForbidden {
-		t.Fatalf("wrong owner key before enrollment: %d", code)
-	}
-	if box.opened != nil || box.enrolled {
-		t.Fatal("wrong owner key changed enrollment state")
-	}
-
-	// The disk refuses the login key after the volume worker has spent its one unlock.
-	blocked := filepath.Join(unlocked, ".authorized_keys")
+	wrong := bytes.Clone(volume)
+	wrong[0] ^= 1
+	blocked := filepath.Join(unlocked, ".monitor.identity")
 	if err := os.Mkdir(blocked, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if code := enroll(key, volume, route); code != http.StatusInternalServerError {
-		t.Fatalf("enrollment with a failing disk: %d", code)
+	if code := request(volume, identity); code != http.StatusInternalServerError {
+		t.Fatal("failed seal", code)
 	}
-	if code := enroll(key, wrongVolume, route); code != http.StatusForbidden {
-		t.Fatalf("another workspace key after the unlock: %d", code)
+	if code := request(wrong, identity); code != http.StatusConflict {
+		t.Fatal("changed unlock", code)
 	}
 	os.Remove(blocked)
-	if code := enroll(key, volume, route); code != http.StatusNoContent {
-		t.Fatalf("identical retry after the unlock: %d", code)
+	if code := request(volume, identity); code != http.StatusNoContent {
+		t.Fatal("retry", code)
 	}
-	if login, _ := os.ReadFile(filepath.Join(unlocked, ".authorized_keys")); !bytes.Contains(login, []byte(key)) {
-		t.Fatalf("sealed login key %q", login)
+	saved, err := os.ReadFile(filepath.Join(unlocked, ".monitor.identity"))
+	if err != nil || string(saved) != identity {
+		t.Fatal("agent identity changed", err)
 	}
-	var sealed monitorRoute
-	if data, _ := os.ReadFile(filepath.Join(unlocked, ".monitor.json")); json.Unmarshal(data, &sealed) != nil || sealed != route {
-		t.Fatalf("sealed Monitor configuration %+v", sealed)
+	if _, err := os.Stat(filepath.Join(unlocked, ".authorized_keys")); !os.IsNotExist(err) {
+		t.Fatal("unlock supplied a login key")
 	}
-
-	// An in-sandbox reboot restarts the service using the receipt on the open disk.
 	box.enrolled, box.opened = box.sealed(), nil
-	if code := enroll(key, volume, route); code != http.StatusNoContent {
-		t.Fatalf("identical retry after restart: %d", code)
+	if code := request(volume, identity); code != http.StatusNoContent {
+		t.Fatal("restart retry", code)
 	}
-	otherIdentity := route
-	otherIdentity.Identity = "-----BEGIN OPENSSH PRIVATE KEY-----\nBBBB\n-----END OPENSSH PRIVATE KEY-----\n"
-	otherEndpoint := route
-	otherEndpoint.Port++
-	if code := enroll(key, wrongVolume, route); code != http.StatusForbidden {
-		t.Fatalf("wrong owner after restart: %d", code)
+	if code := request(wrong, identity); code != http.StatusConflict {
+		t.Fatal("wrong volume retry", code)
 	}
-	for name, code := range map[string]int{
-		"agent identity":   enroll(key, volume, otherIdentity),
-		"Monitor endpoint": enroll(key, volume, otherEndpoint),
-		"login key":        enroll(login(), volume, route),
-	} {
-		if code != http.StatusConflict {
-			t.Errorf("%s after restart: %d", name, code)
-		}
+	if code := request(volume, testIdentity(t)); code != http.StatusConflict {
+		t.Fatal("changed identity retry", code)
 	}
-
-	// The next boot crashed after opening the same disk, so only an earlier receipt is on it.
 	box.sshKey, box.opened = "ecdsa-sha2-nistp256 NEXT", nil
 	if box.enrolled = box.sealed(); box.enrolled {
-		t.Fatal("an earlier boot's receipt counts as this boot's enrollment")
+		t.Fatal("old boot receipt accepted")
 	}
-	if code := enroll(key, volume, route); code == http.StatusNoContent {
-		t.Fatal("acknowledged an earlier boot's enrollment")
-	}
-}
-
-func TestUncontainedEnrollmentHasNoMonitor(t *testing.T) {
-	_, volume, call := testSandbox(t)
-	unlocked := testVolume(t)
-	body := map[string]any{"key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl", "volume": base64.StdEncoding.EncodeToString(volume)}
-	// An earlier contained boot left its Monitor on the disk.
-	if err := os.WriteFile(filepath.Join(unlocked, ".monitor.json"), []byte(`{"ip":"198.51.100.9"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if code := call("/enroll", body); code != http.StatusNoContent {
-		t.Fatalf("enrollment without a Monitor: %d", code)
-	}
-	if data, _ := os.ReadFile(filepath.Join(unlocked, ".monitor.json")); string(data) != "null" {
-		t.Fatalf("sealed Monitor configuration holds %q", data)
-	}
-
-	if code := call("/enroll", body); code != http.StatusNoContent {
-		t.Fatalf("identical retry: %d", code)
-	}
-	route := testRoute
-	route.Identity = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
-	body["monitor"] = route
-	if code := call("/enroll", body); code != http.StatusConflict {
-		t.Fatalf("retry adding a Monitor: %d", code)
+	if code := request(volume, identity); code == http.StatusNoContent {
+		t.Fatal("old boot unlock acknowledged")
 	}
 }
 
-func TestEnrollmentRequiresBootOwnerConfiguration(t *testing.T) {
-	t.Setenv("DOMAIN", "work.example")
-	t.Setenv("SANDBOX_OWNER_KEY_ARGON2ID", "")
-	for _, value := range []string{"not-hex", "aa"} {
-		t.Setenv("SANDBOX_OWNER_KEY_SHA256", value)
-		if err := run(); err == nil || err.Error() != "SANDBOX_OWNER_KEY_SHA256 must be a SHA-256 digest in hex" {
-			t.Fatalf("invalid owner config %q: %v", value, err)
+func TestUnlockRejectsLoginKeysRoutesAndInvalidSecrets(t *testing.T) {
+	box, volume, call := testSandbox(t)
+	identity := testIdentity(t)
+	for _, body := range []map[string]any{
+		{"volume": volume, "monitor_identity": identity, "key": "ssh-ed25519 ATTACKER"},
+		{"volume": volume, "monitor_identity": identity, "monitor": map[string]string{"ip": "198.51.100.7"}},
+		{"volume": volume[:31], "monitor_identity": identity},
+		{"volume": "invalid base64", "monitor_identity": identity},
+		{"volume": volume, "monitor_identity": "invalid key"},
+	} {
+		if code := call(body); code != http.StatusBadRequest || box.opened != nil {
+			t.Fatal("invalid request reached volume", code)
 		}
 	}
-	box, volume, call := testSandbox(t)
-	box.owner = nil
-	if code := call("/enroll", map[string]string{"volume": base64.StdEncoding.EncodeToString(volume)}); code != http.StatusForbidden {
-		t.Fatalf("missing boot owner accepted enrollment: %d", code)
+}
+
+func TestMeasuredOwnerKeyIsTheSSHLoginKey(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := "ed25519:" + base64.StdEncoding.EncodeToString(public)
+	line, err := ownerSSHKey(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _, options, rest, err := ssh.ParseAuthorizedKey([]byte(line))
+	expected, _ := ssh.NewPublicKey(public)
+	if err != nil || !bytes.Equal(key.Marshal(), expected.Marshal()) || len(options) != 0 || len(rest) != 0 {
+		t.Fatal("SSH owner binding changed")
+	}
+	for _, invalid := range []string{"", "invalid", binding + "\n"} {
+		t.Setenv("SANDBOX_OWNER_PUBLIC_KEY", invalid)
+		if err := run(); err == nil || !strings.Contains(err.Error(), "SANDBOX_OWNER_PUBLIC_KEY") {
+			t.Fatal("invalid binding accepted", err)
+		}
+	}
+}
+
+func TestSSHHelperUnlocksThroughPrivateSocket(t *testing.T) {
+	box, volume, _ := testSandbox(t)
+	testVolume(t, volume)
+	old := unlockSocket
+	unlockSocket = filepath.Join(t.TempDir(), "unlock.sock")
+	defer func() { unlockSocket = old }()
+	listener, err := net.Listen("unix", unlockSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: box.unlockHandler()}
+	go server.Serve(listener)
+	defer server.Close()
+	body, _ := json.Marshal(map[string]any{"volume": volume, "monitor_identity": testIdentity(t)})
+	if err := forwardUnlock(bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := forwardUnlock(bytes.NewReader(body)); err != nil {
+		t.Fatal("retry", err)
+	}
+	if err := forwardUnlock(strings.NewReader(`{"key":"supplied-login-key"}`)); err == nil {
+		t.Fatal("accepted enrollment login key")
 	}
 }

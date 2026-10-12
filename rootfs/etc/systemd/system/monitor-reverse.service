@@ -3,10 +3,10 @@ Description=Owner access through Monitor
 Requires=monitor-configure.service
 After=network.target monitor-configure.service
 StartLimitIntervalSec=0
-ConditionPathExists=/run/monitor/route.json
 
 [Service]
-ExecStart=/usr/bin/ssh -NT -F /etc/ssh/monitor-reverse.conf monitor
+ExecStart=/usr/bin/ssh -NT -F /etc/ssh/monitor-reverse.conf -l ${SANDBOX_OWNER_PUBLIC_KEY} monitor
+PassEnvironment=SANDBOX_OWNER_PUBLIC_KEY
 Restart=always
 RestartSec=2s
 TimeoutStopSec=10s
