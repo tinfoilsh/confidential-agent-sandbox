@@ -60,8 +60,8 @@ containers:
       - DOMAIN
       # New launches bind a salted Argon2id owner commitment. SHA-256 is for
       # existing generated credentials. Exactly one binding must be supplied.
-      - SANDBOX_OWNER_KEY_ARGON2ID=
-      - SANDBOX_OWNER_KEY_SHA256=
+      - {SANDBOX_OWNER_KEY_ARGON2ID: ""}
+      - {SANDBOX_OWNER_KEY_SHA256: ""}
 
     tmpfs:
       /run: "rw,nosuid,nodev,mode=755"
