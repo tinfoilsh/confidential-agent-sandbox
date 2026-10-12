@@ -24,7 +24,8 @@ The workspace's `/healthz` endpoint returns an empty readiness response.
 With `--monitor`,
 workload traffic goes through Monitor. Without it, the sandbox has ordinary
 network egress. Private enrollment preserves the shim's TLS; reverse SSH starts after
-enrollment supplies Monitor configuration. Both deployments must share a host.
+enrollment supplies Monitor configuration. The control plane permits the sandbox to reach its assigned Monitor, including
+when they run on separate hosts.
 Keep the keys in `~/.tinfoil/sandboxes/<name>` to reopen its disk.
 
 Home directories, `/workspace`, Docker state, and installed packages stay on the

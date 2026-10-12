@@ -1,7 +1,7 @@
 # An Ubuntu workspace with measured CVM-wide administrator access. Connect with
 # native SSH through Monitor after attested enrollment.
 # Restricted egress requires tinfoild v0.8.19 or newer.
-cvm-version: 0.15.1-rc.2@sha256:ea4592d1970afcbfe0c5265e2e3c100225ee98c207ea98ce34e4fc530a0438a6
+cvm-version: 0.15.1-rc.3@sha256:e1c8d17c7d79663c365169a796eec06116f483825028fad5faddfe9839321217
 # cpus: 32
 # memory: 524288
 # gpus: 8
