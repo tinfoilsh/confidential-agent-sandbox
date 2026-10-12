@@ -742,7 +742,9 @@ def network_config(socks_port, monitor_ip):
         "outbounds": [{"type": "socks", "tag": "monitor", "server": "127.0.0.1",
                        "server_port": socks_port, "network": "tcp"}],
         "route": {
-            "rules": [{"action": "sniff"}, {"protocol": "dns", "action": "hijack-dns"},
+            # SOCKS cannot carry ICMP. Reject it before the TUN synthesizes replies.
+            "rules": [{"network": "icmp", "action": "reject"},
+                      {"action": "sniff"}, {"protocol": "dns", "action": "hijack-dns"},
                       {"network": "udp", "action": "reject"}],
             "final": "monitor",
         },
