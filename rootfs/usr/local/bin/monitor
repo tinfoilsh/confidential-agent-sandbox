@@ -778,7 +778,7 @@ def agent_command(client, name, arguments):
     """Start an installed coding client with an authorized Monitor placeholder."""
     binaries = {"claude": "/nix/var/nix/profiles/default/bin/claude",
                 "codex": "/nix/var/nix/profiles/default/bin/codex",
-                "opencode": "/usr/local/libexec/opencode"}
+                "opencode": "/nix/var/nix/profiles/default/bin/opencode"}
     if arguments[:1] == ["--"]:
         arguments = arguments[1:]
     command = [binaries[name], *arguments]
