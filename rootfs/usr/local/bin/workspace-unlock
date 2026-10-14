@@ -1,183 +1,35 @@
 #!/usr/bin/python3 -I
-"""Read an owner-authenticated unlock request from stdin and open the workspace."""
+"""Send the workspace key on stdin to the CVM volume worker."""
 
-import base64
-import fcntl
-import grp
-import hashlib
-import hmac
-import json
 import os
-from pathlib import Path
 import socket
-import subprocess
 import sys
-import tempfile
 
-
-DISK = Path("/mnt/disk")
-RUNTIME = Path("/run/workspace")
 CONTROL = "/run/tinfoil/volumes/workspace/control.sock"
-MONITOR = Path("/run/monitor")
 
 
-def save(path, data):
-    fd, temporary = tempfile.mkstemp(dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as output:
-            output.write(data)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
+def unlock(key, initialize=False):
+    def ask(operation):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as connection:
+            connection.settimeout(10)
+            connection.connect(CONTROL)
+            connection.sendall(b"\x02" + operation + key)
+            connection.settimeout(None)  # Formatting can take minutes.
+            return connection.recv(256)
 
-
-def control(operation, key):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as connection:
-        connection.settimeout(10)
-        connection.connect(CONTROL)
-        connection.sendall(b"\x02" + operation + key)
-        # Formatting a fresh disk can take minutes.
-        connection.settimeout(None)
-        return connection.recv(256)
-
-
-def activate_workspace(key, initialize):
-    if not Path(CONTROL).exists() and DISK.is_mount():
-        return
-    operation = b"i" if initialize else b"u"
-    status = control(operation, key)
-    # The worker rejects initialization of a nonblank disk. A retry can unlock
-    # that disk with the same key, including after a lost initialization reply.
+    status = ask(b"i" if initialize else b"u")
     if initialize and status == b"rejected":
-        operation, status = b"u", control(b"u", key)
-    if status == b"ok":
-        return
-    action = "initialization" if operation == b"i" else "unlock"
-    if status == b"rejected":
-        raise ValueError(f"workspace {action} request rejected by the volume worker")
-    if status == b"failed":
-        raise ValueError(f"workspace {action} failed in the volume worker; check its logs")
-    raise ValueError("unexpected volume worker response")
+        status = ask(b"u")
+    if status != b"ok":
+        raise ValueError(f"volume worker answered {status!r}")
 
-
-def check_ssh_key(data, description, *arguments):
-    with tempfile.NamedTemporaryFile(dir=RUNTIME) as temporary:
-        temporary.write(data)
-        temporary.flush()
-        result = subprocess.run(["/usr/bin/ssh-keygen", *arguments, "-f", temporary.name],
-                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if result.returncode:
-            raise ValueError(f"invalid {description}")
-
-
-def monitor_route(route):
-    context = json.loads((RUNTIME / "monitor.json").read_text())
-    if (not isinstance(route, dict) or set(route) != {"binding", "host_key"}
-            or route["binding"] != context["binding"] or "ip" not in context):
-        raise ValueError("Monitor route does not match this sandbox's binding or has no endpoint")
-    key = route["host_key"]
-    if not isinstance(key, str) or "\n" in key or "\r" in key:
-        raise ValueError("invalid Monitor host key")
-    check_ssh_key((key + "\n").encode(), "Monitor host key", "-l")
-    return {**context, "host_key": key}
-
-
-def install_route(route):
-    MONITOR.mkdir(mode=0o750, exist_ok=True)
-    group = grp.getgrnam("sandbox").gr_gid
-    os.chown(MONITOR, 0, group)
-    MONITOR.chmod(0o750)
-    # The boot endpoint is fixed; only the owner-authorized pin changes in place.
-    for name, data in {
-        "identity": (DISK / ".monitor.identity").read_bytes(),
-        "endpoint.conf": f"HostName {route['ip']}\nPort {route['port']}\n".encode(),
-        "known_hosts": ("monitor " + route["host_key"] + "\n").encode(),
-        "route.json": json.dumps(route).encode(),
-    }.items():
-        path = MONITOR / name
-        save(path, data)
-        os.chown(path, 0, group)
-        path.chmod(0o640)
-
-
-def unlock(input):
-    data = input.read(65537)
-    if len(data) > 65536:
-        raise ValueError("unlock request is too large")
-    request = json.loads(data)
-    if not isinstance(request, dict):
-        raise ValueError("expected an owner request")
-    operation = request.get("operation")
-    fields = {"operation", "monitor_route"}
-    if operation in ("initialize", "unlock"):
-        fields |= {"volume", "monitor_identity"}
-    elif operation != "route":
-        raise ValueError("expected initialize, unlock or route operation")
-    if set(request) != fields:
-        raise ValueError("unexpected owner request fields")
-    route = monitor_route(request["monitor_route"])
-    with (RUNTIME / "unlock.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        boot = (RUNTIME / "host_key.pub").read_bytes().strip() + b"\n"
-        if operation == "route":
-            if not (DISK / ".enrollment").read_bytes().startswith(boot):
-                raise ValueError("unlock this sandbox boot first")
-        else:
-            receipt = open_workspace(request, boot)
-        install_route(route)
-        if operation != "route":
-            save(DISK / ".enrollment", receipt)
-            os.sync()
-        # A lost reply repeats the same installation. Never restart the reverse tunnel.
-        if Path("/run/systemd/system").exists():
-            subprocess.run(["/usr/bin/systemctl", "restart", "monitor-network.service"], check=True)
-
-
-def open_workspace(request, boot):
-    key = base64.b64decode(request["volume"], validate=True)
-    if len(key) != 32:
-        raise ValueError("volume must encode a 32-byte workspace key")
-    identity = request["monitor_identity"].encode()
-    check_ssh_key(identity, "Monitor agent identity", "-y", "-P", "")
-
-    receipt = boot + hashlib.sha256(key + identity).hexdigest().encode() + b"\n"
-    sealed = DISK / ".enrollment"
-    previous = sealed.read_bytes() if sealed.exists() else b""
-    if previous.startswith(boot):
-        if not hmac.compare_digest(previous, receipt):
-            raise ValueError("workspace was unlocked with different credentials")
-        return receipt
-    opened = RUNTIME / "unlock.opened"
-    if opened.exists():
-        if not hmac.compare_digest(opened.read_bytes(), receipt):
-            raise ValueError("workspace was opened by another unlock request")
-    else:
-        intent = RUNTIME / "unlock.intent"
-        if intent.exists() and not hmac.compare_digest(intent.read_bytes(), receipt):
-            raise ValueError("another unlock request is pending")
-        save(intent, receipt)
-        try:
-            activate_workspace(key, request["operation"] == "initialize")
-        except ValueError:
-            intent.unlink(missing_ok=True)
-            raise
-        if not DISK.is_mount():
-            raise ValueError("volume worker did not mount the workspace")
-        # Preserve partial progress across script exits, until this container stops.
-        save(opened, receipt)
-    save(DISK / ".monitor.identity", identity)
-    return receipt
 
 if __name__ == "__main__":
-    # The old CLI invokes workspace-enroll --unlock through a compatibility symlink.
-    if sys.argv[1:] not in ([], ["--unlock"]):
-        sys.exit("usage: workspace-unlock < unlock.json")
+    if sys.argv[1:] not in ([], ["--initialize"]):
+        sys.exit("usage: workspace-unlock [--initialize] < key")
     if os.geteuid() != 0:
-        os.execv("/usr/bin/sudo", ["sudo", "-n", "--", "/usr/local/bin/workspace-unlock"])
-    os.umask(0o077)
+        os.execv("/usr/bin/sudo", ["sudo", "-n", "--", "/usr/local/bin/workspace-unlock", *sys.argv[1:]])
     try:
-        unlock(sys.stdin.buffer)
-    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+        unlock(sys.stdin.buffer.read(), bool(sys.argv[1:]))
+    except (OSError, ValueError) as error:
         sys.exit(f"workspace-unlock: {error}")

@@ -4,7 +4,6 @@ After=network.target
 StartLimitIntervalSec=0
 
 [Service]
-ExecCondition=/usr/bin/test -s /run/workspace/monitor-bootstrap.conf
 ExecStart=/usr/bin/ssh -NT -F /etc/ssh/monitor-reverse.conf monitor
 Restart=always
 RestartSec=2s

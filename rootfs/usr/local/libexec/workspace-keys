@@ -2,8 +2,6 @@
 """Prepare the measured owner login key and Monitor bootstrap route."""
 
 import base64
-import ipaddress
-import json
 import os
 from pathlib import Path
 import sys
@@ -24,24 +22,7 @@ def prepare(directory, environment):
     authorized.write_text(owner_key(environment["SANDBOX_OWNER_PUBLIC_KEY"]))
     authorized.chmod(0o644)
     instance = str(uuid.UUID(environment["SANDBOX_INSTANCE_ID"]))
-    binding = json.loads(environment["MONITOR_BINDING"])
-    if set(binding) != {"container_id", "owner_public_key"}:
-        raise ValueError("invalid MONITOR_BINDING")
-    uuid.UUID(binding["container_id"])
-    owner_key(binding["owner_public_key"])
-    endpoint = environment.get("MONITOR_ENDPOINT", "")
-    context = {"binding": binding}
-    if endpoint:
-        ip, port = endpoint.split(":")
-        address = ipaddress.IPv4Address(ip)
-        port = int(port)
-        if (address.is_loopback or address.is_link_local or address.is_multicast
-                or address.is_unspecified or int(address) == 0xffffffff or not 1 <= port <= 65535):
-            raise ValueError("invalid MONITOR_ENDPOINT")
-        context.update(ip=str(address), port=port)
-        (directory / "monitor-bootstrap.conf").write_text(
-            f"HostName {address}\nPort {port}\nUser sandbox-v2:{instance}\n")
-    (directory / "monitor.json").write_text(json.dumps(context))
+    (directory / "monitor-bootstrap.conf").write_text(f"User sandbox-v2:{instance}\n")
 
 
 if __name__ == "__main__":

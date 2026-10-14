@@ -9,7 +9,6 @@ umask 022
 install -d -m 0711 "$credentials"
 # OpenSSH reads the PKCS#8 key the CVM attests, so sshd and reverse SSH prove the same key.
 install -m 0600 /run/tinfoil/keys/host-ssh/private_key.pem "$credentials/host_key"
-ssh-keygen -y -f "$credentials/host_key" > "$credentials/host_key.pub"
 # Login authority comes only from the measured key, including on an existing disk.
 /usr/local/libexec/workspace-keys
 # Public launch configuration lets the owner reach this boot before unlocking it.
@@ -17,7 +16,6 @@ ssh-keygen -y -f "$credentials/host_key" > "$credentials/host_key.pub"
     child=
     trap '[[ -z "$child" ]] || kill "$child" 2>/dev/null; exit 0' TERM INT
     while true; do
-        [[ -s "$credentials/monitor-bootstrap.conf" ]] || { sleep 2; continue; }
         /usr/bin/ssh -NT -F /etc/ssh/monitor-reverse.conf monitor &
         child=$!
         wait "$child" || true
@@ -36,19 +34,16 @@ if [[ -S /run/tinfoil/volumes/workspace/control.sock ]]; then
     bootstrap_ssh=$!
     /usr/local/libexec/workspace-attestation &
     attestation=$!
-    until [[ $(head -n1 "$disk/.enrollment" 2>/dev/null) == "$(<"$credentials/host_key.pub")" ]]; do
+    while [[ -S /run/tinfoil/volumes/workspace/control.sock ]]; do
         kill -0 "$bootstrap_ssh" "$attestation"
         sleep 0.2
     done
-    # The receipt appears before the helper's final sync; wait for it to finish.
-    flock "$credentials/unlock.lock" true
     kill "$bootstrap_ssh"
     wait "$bootstrap_ssh" || true
     bootstrap_ssh=
 fi
-# Without the socket the disk opened earlier this boot; an enrollment that crashed after the unlock needs a new boot.
-[[ $(head -n1 "$disk/.enrollment") == "$(<"$credentials/host_key.pub")" ]] || { echo "this boot's enrollment did not finish; restart the sandbox" >&2; exit 1; }
-# The login key is already fixed; only the agent secret comes from the disk.
+# A locked volume is a read-only placeholder; the worker mounts writable ext4.
+findmnt -rn -M "$disk" -t ext4 -O rw >/dev/null || { echo "workspace is not unlocked" >&2; exit 1; }
 # The pack names its closure without the hash here, which is what nix.conf reads.
 install -d /nix/var/nix/profiles /nix/var/nix/daemon-socket
 ln -sfn /tinfoil/models/nix/nix/var/nix/profiles/default /nix/var/nix/profiles/default

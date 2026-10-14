@@ -1,7 +1,7 @@
 # An Ubuntu workspace with measured CVM-wide administrator access. Connect with
 # native SSH through Monitor after attested disk unlock.
-# Restricted egress requires tinfoild v0.8.19 or newer.
-cvm-version: 0.15.1-rc.3@sha256:e1c8d17c7d79663c365169a796eec06116f483825028fad5faddfe9839321217
+# Requires a CVM release with 10.254.0.0/24 alias support and host capability 5.
+cvm-version: 0.15.1-rc.5@sha256:4b9ee4bff8c46aa5b23d91ade30f8f2528af4a3dd805cae712a9245f7023c325
 # cpus: 32
 # memory: 524288
 # gpus: 8
@@ -60,8 +60,6 @@ containers:
       - SANDBOX_OWNER_PUBLIC_KEY: ""
       - SANDBOX_INSTANCE_ID: ""
       - MONITOR_BINDING: ""
-      # An untrusted locator, supplied only on deploy, never on create.
-      - MONITOR_ENDPOINT
 
     tmpfs:
       /run: "rw,nosuid,nodev,mode=755"
