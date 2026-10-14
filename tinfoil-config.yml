@@ -37,7 +37,7 @@ models:
 
 containers:
   - name: "workspace"
-    image: "ghcr.io/tinfoilsh/confidential-agent-sandbox@sha256:a37ad20683e56e9b46b16a03b32db5423154d783b4df660e2ec138986e2ab310" # rewritten at release
+    image: "ghcr.io/tinfoilsh/confidential-agent-sandbox@sha256:f0c7e5b8d4b11f631515a90138fbde29fd060d9eafde8f5c90e0eb755a68cb4d" # v0.1.18
     # runtime: nvidia
     # gpus: all
     restart: on-failure
