@@ -1,0 +1,18 @@
+{
+  "providers": {
+    "tinfoil": {
+      "name": "Tinfoil through Monitor",
+      "type": "openai-compat",
+      "base_url": "https://inference.tinfoil.sh/v1",
+      "api_key": "tfm_tinfoil_TINFOIL_API_KEY",
+      "models": [
+        {
+          "id": "kimi-k3",
+          "name": "Kimi K3",
+          "context_window": 256000,
+          "default_max_tokens": 65536
+        }
+      ]
+    }
+  }
+}

@@ -774,42 +774,6 @@ def network_command(client):
 
 
 
-def agent_command(client, name, arguments):
-    """Start an installed coding client with an authorized Monitor placeholder."""
-    binaries = {"claude": "/nix/var/nix/profiles/default/bin/claude",
-                "codex": "/nix/var/nix/profiles/default/bin/codex",
-                "opencode": "/nix/var/nix/profiles/default/bin/opencode"}
-    if arguments[:1] == ["--"]:
-        arguments = arguments[1:]
-    command = [binaries[name], *arguments]
-    if arguments in (["--version"], ["-v"], ["--help"], ["-h"]):
-        os.execve(command[0], command, os.environ.copy())
-    with Session(client) as session:
-        selected = os.environ.get("TINFOIL_CONNECTION")
-        connections = [c for c in client.connections() if c["kind"] == "tinfoil"
-                       and (not selected or c["name"] == selected)]
-        if not connections:
-            raise MonitorError("Add a Tinfoil account and API key in Monitor, then grant this sandbox access. "
-                               "Check monitor connections" + (f" and TINFOIL_CONNECTION={selected}" if selected else ""))
-        if len(connections) != 1:
-            raise MonitorError("Choose a Tinfoil account with TINFOIL_CONNECTION="
-                               + " or ".join(c["name"] for c in connections))
-        connection = connections[0]
-        if connection["state"] != "ready":
-            raise MonitorError(f"Tinfoil connection {connection['name']!r} is {connection['state']}; check Monitor")
-        env = session.environment([connection["name"]], None)
-        if not env.get("TINFOIL_API_KEY"):
-            raise MonitorError("The Tinfoil account has no API key; add it in Monitor")
-        env["ANTHROPIC_AUTH_TOKEN"] = env["TINFOIL_API_KEY"]
-        env.pop("ANTHROPIC_API_KEY", None)
-        if name == "opencode":
-            # The provider and adapter are bundled; first use needs no catalog or auth plugin download.
-            for variable in ("OPENCODE_DISABLE_MODELS_FETCH", "OPENCODE_DISABLE_DEFAULT_PLUGINS", "OPENCODE_DISABLE_AUTOUPDATE"):
-                env.setdefault(variable, "true")
-        return run_child(session, command, env)
-
-
-
 def parser():
     p = argparse.ArgumentParser(
         prog="monitor",
@@ -822,9 +786,6 @@ def parser():
     p.add_argument("--client-config", default=str(Path.home() / ".config/monitor/client.json"), help="client profiles JSON file")
     p.add_argument("--timeout", type=float, default=300, help="request timeout in seconds (default: 300)")
     commands = p.add_subparsers(dest="command", required=True)
-    agent = commands.add_parser("agent", help="start a preconfigured coding client using Tinfoil through Monitor")
-    agent.add_argument("name", choices=("claude", "codex", "opencode"))
-    agent.add_argument("argv", nargs=argparse.REMAINDER)
     run = commands.add_parser("run", help="run a local command through Monitor")
     run.add_argument("--connection", action="append", default=[], metavar="NAME", help="HTTP connection to use; repeat for several")
     run.add_argument("argv", nargs=argparse.REMAINDER, help="-- COMMAND [ARG ...]")
@@ -853,8 +814,6 @@ def main(argv=None):
         if args.ssh_config:
             args.ssh_config = os.path.abspath(os.path.expanduser(args.ssh_config))
         client = Client(args.ssh_host, args.ssh_config, args.timeout)
-        if args.command == "agent":
-            return agent_command(client, args.name, args.argv)
         if args.command in ("run", "shell", "mcp", "network"):
             if sys.version_info < (3, 11):
                 raise MonitorError("this command requires Python 3.11 or newer")

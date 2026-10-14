@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "tinfoil": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Tinfoil through Monitor",
+      "options": {
+        "baseURL": "https://inference.tinfoil.sh/v1",
+        "apiKey": "tfm_tinfoil_TINFOIL_API_KEY"
+      },
+      "models": {
+        "kimi-k3": {
+          "name": "Kimi K3",
+          "limit": {"context": 256000, "output": 65536}
+        }
+      }
+    }
+  }
+}
