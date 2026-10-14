@@ -724,7 +724,7 @@ def load_profile(args):
         args.connection = args.connection or connections
 
 
-def network_config(socks_port, monitor_ip):
+def network_config(socks_port):
     # FakeIP keeps the hostname intact through the TUN and SSH SOCKS hop.
     # No upstream DNS or direct outbound exists in this configuration.
     # The CVM lacks IPv6 policy routing; FakeIP only answers A queries.
@@ -738,7 +738,7 @@ def network_config(socks_port, monitor_ip):
         },
         "inbounds": [{"type": "tun", "interface_name": "monitor0",
                       "address": ["100.127.255.1/30"],
-                      "auto_route": True, "route_exclude_address": [monitor_ip + "/32", "172.31.255.0/30"]}],
+                      "auto_route": True, "route_exclude_address": ["10.254.0.1/32", "172.31.255.0/30"]}],
         "outbounds": [{"type": "socks", "tag": "monitor", "server": "127.0.0.1",
                        "server_port": socks_port, "network": "tcp"}],
         "route": {
@@ -768,8 +768,7 @@ def network_command(client):
             temporary.replace(certificate)
         subprocess.run(["update-ca-certificates", "--fresh"], check=True)
         config = session.directory / "sing-box.json"
-        route = json.loads(Path("/run/monitor/route.json").read_text())
-        config.write_text(json.dumps(network_config(session.socks_port, route["ip"])))
+        config.write_text(json.dumps(network_config(session.socks_port)))
         # run_child tears down the TUN on tunnel loss. Host containment stays active.
         return run_child(session, ["/usr/local/bin/sing-box", "run", "-c", str(config)], os.environ.copy())
 

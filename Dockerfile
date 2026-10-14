@@ -90,8 +90,7 @@ RUN chmod 0440 /etc/sudoers.d/90-sandbox \
        done \
     && /usr/local/bin/monitor run --help > /dev/null \
     && /usr/local/bin/monitor mcp serve --help > /dev/null \
-    && /usr/local/bin/monitor network --help > /dev/null \
-    && ln -s ../bin/workspace-unlock /usr/local/libexec/workspace-enroll
+    && /usr/local/bin/monitor network --help > /dev/null
 
 RUN systemctl disable ssh.socket \
     && systemctl enable ssh.service docker.service cron.service monitor-network.service monitor-reverse.service workspace-attestation.service \
