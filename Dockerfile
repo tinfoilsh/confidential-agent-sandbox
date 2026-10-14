@@ -20,8 +20,6 @@ ARG BUILDX_VERSION=0.37.1
 ARG BUILDX_SHA256=9447199cdb435f25880548343c128a4b6650e8891ee598905d8d29d39a8e359b
 ARG SING_BOX_VERSION=1.14.3
 ARG SING_BOX_SHA256=e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee
-ARG OPENCODE_VERSION=1.19.0
-ARG OPENCODE_SHA256=6334d70db3990721ea454357e9cf2573c8685524ad7769af9d52cbffb7008438
 
 RUN yes | DEBIAN_FRONTEND=noninteractive unminimize \
     && rm -f /etc/dpkg/dpkg.cfg.d/docker-apt-speedup \
@@ -81,15 +79,6 @@ RUN curl -fsSL --retry 3 "https://github.com/SagerNet/sing-box/releases/download
     && mkdir -p /usr/local/share/licenses/sing-box \
     && tar -xOzf /tmp/sing-box.tar.gz "sing-box-${SING_BOX_VERSION}-linux-amd64/LICENSE" > /usr/local/share/licenses/sing-box/LICENSE \
     && rm /tmp/sing-box.tar.gz
-
-# Claude and Codex are already in the pinned Nix toolchain. OpenCode is a
-# self-contained binary; install it at build time so first use needs no download.
-RUN mkdir -p /usr/local/libexec \
-    && curl -fsSL --retry 3 "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64-baseline.tar.gz" -o /tmp/opencode.tar.gz \
-    && echo "${OPENCODE_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c - \
-    && tar -xzf /tmp/opencode.tar.gz -C /usr/local/libexec opencode \
-    && rm /tmp/opencode.tar.gz \
-    && /usr/local/libexec/opencode --version
 
 COPY --chmod=0755 entrypoint.sh /entrypoint
 COPY rootfs/ /

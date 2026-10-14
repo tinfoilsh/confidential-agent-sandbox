@@ -30,7 +30,7 @@ files are preserved. Defaults live in `~/.claude/settings.json`,
 OpenCode uses Chat Completions, Codex uses Responses, and Monitor translates
 Claude's Messages requests (including streaming and local tool use).
 
-Claude and Codex come from the pinned Nix toolchain in `tinfoil-config.yml`.
-OpenCode is version- and checksum-pinned in the Dockerfile. All three binaries
-are present before the first command; default OpenCode provider discovery and
-auth plugin downloads are disabled by its launcher.
+Claude, Codex, and OpenCode come from the pinned Nix toolchain in
+`tinfoil-config.yml`. All three binaries are present before the first command;
+default OpenCode provider discovery and auth plugin downloads are disabled by
+its launcher.
