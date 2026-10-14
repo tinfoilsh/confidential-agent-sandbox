@@ -1,65 +1,101 @@
 #!/usr/bin/python3 -I
-"""Seed Tinfoil defaults after mounting the persistent home, preserving user files."""
+"""Add optional Tinfoil providers after mounting home; keep user selections."""
 
+import hashlib
 import json
 import os
-from pathlib import Path
 import sys
+import tempfile
+from pathlib import Path
+
+TEMPLATES = Path("/usr/local/share/tinfoil")
+
+# Exact bytes written by seed-agent-config in sandbox v0.1.17 (3f04860).
+# Only remove untouched generated defaults; edited files belong to the user.
+LEGACY_DEFAULTS = {
+    ".claude/settings.json": "d46cb236c288ed7d20c04bd9f7a1ae3bf96037a7b66666b44d9a3ba40cdbcc45",
+    ".claude.json": "0a36653758773bee16eb8c2a3686f0402c5ce89601ae84a12b60287d4c198cb9",
+    ".codex/config.toml": "5887040b85d386aef6ff1a2e575eded4033c148a1c7fbaffe392462716441911",
+    ".config/opencode/opencode.json": "2cd3b039cdcde5daa6ad0bcfc5cec3a1fa058cc04e4a8f488da015e7228e2088",
+}
 
 
-def seed(directory):
-    files = {
-        ".claude/settings.json": json.dumps({
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://inference.tinfoil.sh",
-                "ANTHROPIC_MODEL": "kimi-k3",
-                "ANTHROPIC_DEFAULT_OPUS_MODEL": "kimi-k3",
-                "ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-k3",
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "kimi-k3",
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-                "DISABLE_AUTOUPDATER": "1",
-                "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
-                "ENABLE_TOOL_SEARCH": "false",
-            },
-        }, indent=2) + "\n",
-        ".claude.json": json.dumps({"hasCompletedOnboarding": True, "theme": "dark"}) + "\n",
-        ".codex/config.toml": '''model = "kimi-k3"
-model_provider = "tinfoil"
-model_context_window = 256000
-model_auto_compact_token_limit = 200000
+def create(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return
+    with os.fdopen(fd, "w") as output:
+        output.write(content)
 
-[model_providers.tinfoil]
-name = "Tinfoil through Monitor"
-base_url = "https://inference.tinfoil.sh/v1"
-env_key = "TINFOIL_API_KEY"
-wire_api = "responses"
-requires_openai_auth = false
-supports_websockets = false
-''',
-        ".config/opencode/opencode.json": json.dumps({
-            "$schema": "https://opencode.ai/config.json",
-            "model": "tinfoil/kimi-k3",
-            "small_model": "tinfoil/kimi-k3",
-            "enabled_providers": ["tinfoil"],
-            "share": "disabled",
-            "autoupdate": False,
-            "provider": {"tinfoil": {
-                "npm": "@ai-sdk/openai-compatible",
-                "name": "Tinfoil through Monitor",
-                "options": {"baseURL": "https://inference.tinfoil.sh/v1", "apiKey": "{env:TINFOIL_API_KEY}"},
-                "models": {"kimi-k3": {"name": "Kimi K3", "limit": {"context": 256000, "output": 65536}}},
-            }},
-        }, indent=2) + "\n",
-    }
-    for relative, text in files.items():
-        target = directory / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
+
+def add_provider(path, template, key):
+    """Pi and Droid only load providers from their user's shared settings file."""
+    if not path.exists() and not path.is_symlink():
+        create(path, template.read_text())
+        return
+    try:
+        if path.is_symlink():
+            raise ValueError("symlink")
+        data = json.loads(path.read_text())
+        before = json.dumps(data)
+        provider = json.loads(template.read_text())[key]
+        if key == "providers":
+            data.setdefault(key, {}).setdefault("tinfoil", provider["tinfoil"])
+        else:
+            models = data.setdefault(key, [])
+            if not isinstance(models, list):
+                raise ValueError("customModels is not an array")
+            model = provider[0]
+            if not any(
+                m.get("model") == model["model"]
+                and m.get("baseUrl") == model["baseUrl"]
+                for m in models
+            ):
+                models.append(model)
+        if before == json.dumps(data):
+            return
+    except (OSError, ValueError, AttributeError, TypeError) as error:
+        print(f"seed-agent-config: preserving {path}: {error}", file=sys.stderr)
+        return
+    # Do not leave partial user settings if boot is interrupted.
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as output:
+        temporary = Path(output.name)
         try:
-            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            continue
-        with os.fdopen(fd, "w") as output:
-            output.write(text)
+            output.write(json.dumps(data, indent=2) + "\n")
+            output.close()
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def seed(directory, templates=TEMPLATES):
+    for relative, digest in LEGACY_DEFAULTS.items():
+        path = directory / relative
+        try:
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and hashlib.sha256(path.read_bytes()).hexdigest() == digest
+            ):
+                path.unlink()
+        except OSError as error:
+            print(f"seed-agent-config: preserving {path}: {error}", file=sys.stderr)
+
+    create(
+        directory / ".codex/tinfoil.config.toml", (templates / "codex.toml").read_text()
+    )
+    create(
+        directory / ".config/goose/custom_providers/tinfoil.json",
+        (templates / "goose.json").read_text(),
+    )
+    add_provider(
+        directory / ".pi/agent/models.json", templates / "pi.json", "providers"
+    )
+    add_provider(
+        directory / ".factory/settings.json", templates / "droid.json", "customModels"
+    )
 
 
 if __name__ == "__main__":

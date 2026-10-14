@@ -1,0 +1,12 @@
+{
+  "customModels": [
+    {
+      "model": "kimi-k3",
+      "displayName": "Kimi K3 (Tinfoil through Monitor)",
+      "baseUrl": "https://inference.tinfoil.sh/v1",
+      "apiKey": "tfm_tinfoil_TINFOIL_API_KEY",
+      "provider": "generic-chat-completion-api",
+      "maxOutputTokens": 65536
+    }
+  ]
+}

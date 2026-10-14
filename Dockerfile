@@ -85,10 +85,6 @@ COPY rootfs/ /
 COPY --from=build /workspace-attestation /usr/local/libexec/workspace-attestation
 RUN chmod 0440 /etc/sudoers.d/90-sandbox \
     && chmod 0755 /usr/local/libexec/workspace-keys /usr/local/bin/workspace-unlock /usr/local/bin/monitor /usr/local/libexec/seed-agent-skills /usr/local/libexec/seed-agent-config \
-    && for agent in claude codex opencode; do \
-         printf '#!/bin/sh\nexec /usr/local/bin/monitor agent %s -- "$@"\n' "$agent" > "/usr/local/bin/$agent"; \
-         chmod 0755 "/usr/local/bin/$agent"; \
-       done \
     && for script in /entrypoint /healthcheck.sh /usr/local/libexec/seed-agent-skills /etc/profile.d/zz-monitor.sh; do \
          bash -n "$script" || exit 1; \
        done \
