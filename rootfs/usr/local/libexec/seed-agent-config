@@ -1,0 +1,66 @@
+#!/usr/bin/python3 -I
+"""Seed Tinfoil defaults after mounting the persistent home, preserving user files."""
+
+import json
+import os
+from pathlib import Path
+import sys
+
+
+def seed(directory):
+    files = {
+        ".claude/settings.json": json.dumps({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://inference.tinfoil.sh",
+                "ANTHROPIC_MODEL": "kimi-k3",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "kimi-k3",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-k3",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "kimi-k3",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                "DISABLE_AUTOUPDATER": "1",
+                "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+                "ENABLE_TOOL_SEARCH": "false",
+            },
+        }, indent=2) + "\n",
+        ".claude.json": json.dumps({"hasCompletedOnboarding": True, "theme": "dark"}) + "\n",
+        ".codex/config.toml": '''model = "kimi-k3"
+model_provider = "tinfoil"
+model_context_window = 256000
+model_auto_compact_token_limit = 200000
+
+[model_providers.tinfoil]
+name = "Tinfoil through Monitor"
+base_url = "https://inference.tinfoil.sh/v1"
+env_key = "TINFOIL_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+''',
+        ".config/opencode/opencode.json": json.dumps({
+            "$schema": "https://opencode.ai/config.json",
+            "model": "tinfoil/kimi-k3",
+            "small_model": "tinfoil/kimi-k3",
+            "enabled_providers": ["tinfoil"],
+            "share": "disabled",
+            "autoupdate": False,
+            "provider": {"tinfoil": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Tinfoil through Monitor",
+                "options": {"baseURL": "https://inference.tinfoil.sh/v1", "apiKey": "{env:TINFOIL_API_KEY}"},
+                "models": {"kimi-k3": {"name": "Kimi K3", "limit": {"context": 256000, "output": 65536}}},
+            }},
+        }, indent=2) + "\n",
+    }
+    for relative, text in files.items():
+        target = directory / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "w") as output:
+            output.write(text)
+
+
+if __name__ == "__main__":
+    seed(Path(sys.argv[1]))
