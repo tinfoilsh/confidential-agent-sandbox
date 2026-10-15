@@ -27,5 +27,5 @@ do
     fi
 done
 
-printf '%s\n' 'Tinfoil substitution key updated. Choose Tinfoil in your harness (Codex: codex --profile tinfoil).' \
+printf '%s\n' 'Tinfoil substitution key updated. Choose Tinfoil in your harness.' \
     'Restart running harnesses to reload settings.'
