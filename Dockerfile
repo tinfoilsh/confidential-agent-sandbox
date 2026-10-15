@@ -61,6 +61,8 @@ RUN yes | DEBIAN_FRONTEND=noninteractive unminimize \
       '. /nix/var/nix/profiles/default/etc/profile.d/50-sandbox.sh' \
       '[ "$(id -u)" = 0 ] || export NIX_CONFIG="store = daemon"' \
       > /etc/profile.d/nix.sh \
+    # Monitor supplies its own shell startup and identity prompt.
+    && printf '%s\n' '[ -n "${MONITOR_CLIENT_PROFILE:-}" ] || . /etc/profile.d/nix.sh' >> /etc/bash.bashrc \
     && rm -f /etc/ssh/ssh_host_* \
     # PAM displays our static /etc/motd instead of Ubuntu's generated welcome.
     && rm -f /etc/update-motd.d/* /run/motd.dynamic \
