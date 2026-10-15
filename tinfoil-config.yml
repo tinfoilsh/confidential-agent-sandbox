@@ -59,7 +59,7 @@ containers:
       # The dashboard supplies public owner and resource bindings.
       - SANDBOX_OWNER_PUBLIC_KEY: ""
       - SANDBOX_INSTANCE_ID: ""
-      - MONITOR_BINDING: ""
+      - NO_MONITOR: ""
 
     tmpfs:
       /run: "rw,nosuid,nodev,mode=755"
