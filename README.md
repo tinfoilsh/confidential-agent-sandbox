@@ -11,6 +11,11 @@ ssh work
 
 Rerun `attest-ssh` after either VM reboots. Back up the CLI's encryption credentials.
 
+SSH logins show a short Tinfoil welcome in place of Ubuntu's default MOTD.
+The release build stamps its version into the banner; local builds show `dev`
+unless built with `--build-arg SANDBOX_VERSION=...`. The connectivity hint uses
+`<name>` because the dashboard name is not passed into the sandbox.
+
 Coding agents start with their normal provider selection and authentication.
 Tinfoil is an optional provider or launch setting; there are no agent wrappers
 or `monitor agent` command.
