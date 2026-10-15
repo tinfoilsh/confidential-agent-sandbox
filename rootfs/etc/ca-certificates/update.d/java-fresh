@@ -1,0 +1,7 @@
+#!/bin/sh
+set -e
+
+# Ubuntu 24.04 does not forward --fresh to the hooks. Queue a full Java refresh
+# before jks-keystore processes its updates so removed CAs are also dropped.
+cat >/dev/null
+exec dpkg-trigger --no-await update-ca-certificates-java-fresh
