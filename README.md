@@ -25,6 +25,9 @@ The release build stamps its version into the banner; local builds show `dev`
 unless built with `--build-arg SANDBOX_VERSION=...`. The connectivity hint uses
 `<name>` because the dashboard name is not passed into the sandbox.
 
+Shells keep Ubuntu's standard prompt and key bindings. The toolchain's Starship,
+Atuin, zoxide, and Carapace hooks are not enabled automatically.
+
 Coding agents start with their normal provider selection and authentication.
 Tinfoil is an optional provider or launch setting; there are no agent wrappers
 or `monitor agent` command.

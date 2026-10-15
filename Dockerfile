@@ -58,6 +58,8 @@ RUN yes | DEBIAN_FRONTEND=noninteractive unminimize \
       > /etc/nix/nix.conf \
     && printf '%s\n' \
       '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' \
+      '# Keep Ubuntu shell defaults; skip the toolchain interactive hooks.' \
+      '_SANDBOX_SHELL_INITIALIZED=1' \
       '. /nix/var/nix/profiles/default/etc/profile.d/50-sandbox.sh' \
       '[ "$(id -u)" = 0 ] || export NIX_CONFIG="store = daemon"' \
       > /etc/profile.d/nix.sh \
