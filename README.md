@@ -105,6 +105,20 @@ settings remain in `/etc/environment`. Chat Completions clients use
 Messages translation in the connector. No connector or attestation code is
 changed here.
 
+Java uses the system CA set too. `ca-certificates-java` maintains
+`/etc/ssl/certs/java/cacerts`, and `JAVAX_NET_SSL_TRUSTSTORE` directs the Nix JDKs
+to it. The distro's headless JRE runs the CA updater independently of the Nix
+profile. Monitor's existing `update-ca-certificates --fresh` call imports its
+CA and handles rotation. A preceding hook queues a full Java refresh because
+Ubuntu 24.04 does not pass `--fresh` to the Java hook; this also removes deleted
+roots. Sandboxes without Monitor retain the public CA set.
+
+`tests/smoke_java_trust.py JAVA [JAVA ...]` runs as root in a disposable sandbox
+image with the Nix store mounted. It verifies local HTTPS with the supplied Nix
+JDK executables, preserves public roots, and checks addition, rotation, and
+removal of a temporary CA. It requires no external network and removes its
+temporary CA on exit.
+
 Static configuration assumes one accessible connector claims
 `inference.tinfoil.sh`, named `tinfoil`. Renaming it requires updating the
 placeholder in the relevant config files. Multiple equally specific claims

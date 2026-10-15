@@ -24,7 +24,7 @@ ARG SING_BOX_SHA256=e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5
 RUN yes | DEBIAN_FRONTEND=noninteractive unminimize \
     && rm -f /etc/dpkg/dpkg.cfg.d/docker-apt-speedup \
     && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates \
+      ca-certificates ca-certificates-java default-jre-headless \
       pciutils \
       curl \
       git \
@@ -92,6 +92,7 @@ COPY --from=build /workspace-attestation /usr/local/libexec/workspace-attestatio
 ARG SANDBOX_VERSION=dev
 RUN sed -i "s/<VERSION>/${SANDBOX_VERSION}/" /etc/motd \
     && chmod 0440 /etc/sudoers.d/90-sandbox \
+    && chmod 0755 /etc/ca-certificates/update.d/java-fresh \
     && chmod 0755 /usr/local/libexec/workspace-keys /usr/local/bin/workspace-unlock /usr/local/bin/monitor /usr/local/libexec/seed-agent-skills /usr/local/libexec/seed-agent-config /usr/local/libexec/enable-tinfoil \
     && for script in /entrypoint /healthcheck.sh /usr/local/libexec/seed-agent-skills /usr/local/libexec/enable-tinfoil /etc/profile.d/zz-monitor.sh; do \
          bash -n "$script" || exit 1; \
