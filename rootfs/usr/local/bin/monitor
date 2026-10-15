@@ -797,6 +797,9 @@ def parser():
     serve.add_argument("--listen", default="127.0.0.1:8400", help="loopback IP:port; port 0 selects a free port")
     connections = commands.add_parser("connections", help="list reachable connections and their current status")
     connections.add_argument("--json", action="store_true", help="include account, host and access settings as JSON")
+    enable = commands.add_parser("enable", help="set the fake key in optional Tinfoil provider settings")
+    enable.add_argument("provider", choices=["tinfoil"])
+    enable.add_argument("placeholder", metavar="FAKE_KEY", help="public tfm_tinfoil_ placeholder copied from Monitor")
     commands.add_parser("network", help="run the system-wide SSH/TUN service (root only)")
     return p
 
@@ -808,6 +811,8 @@ def main(argv=None):
         p.error("--timeout must be a positive, finite number")
     previous = {}
     try:
+        if args.command == "enable":
+            return subprocess.run(["/usr/local/libexec/enable-tinfoil", args.placeholder]).returncode
         load_profile(args)
         args.ssh_host = args.ssh_host or os.environ.get("MONITOR_SSH_HOST", "monitor")
         args.ssh_config = args.ssh_config or os.environ.get("MONITOR_SSH_CONFIG")
