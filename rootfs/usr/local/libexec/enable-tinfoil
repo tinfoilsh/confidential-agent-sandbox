@@ -2,8 +2,8 @@
 set -euo pipefail
 
 if [[ $# != 1 || ! $1 =~ ^tfm_tinfoil_[a-zA-Z0-9_]+$ ]]; then
-    printf '%s\n' 'Usage: monitor enable tinfoil <fake-key>' \
-        'Copy the tfm_tinfoil_ placeholder from the tinfoil connection in Monitor.' >&2
+    printf '%s\n' 'Usage: monitor enable tinfoil <substitution-key>' \
+        'Copy the tfm_tinfoil_ substitution key from the tinfoil connection in Monitor.' >&2
     exit 2
 fi
 
@@ -27,5 +27,5 @@ do
     fi
 done
 
-printf '%s\n' 'Tinfoil placeholders updated. Choose Tinfoil in your harness (Codex: codex --profile tinfoil).' \
+printf '%s\n' 'Tinfoil substitution key updated. Choose Tinfoil in your harness (Codex: codex --profile tinfoil).' \
     'Restart running harnesses to reload settings.'

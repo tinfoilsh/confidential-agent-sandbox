@@ -6,7 +6,8 @@ Welcome to your sandbox!
 
 Manage connectivity: tinfoil monitor open <name> (on your computer)
 Start coding:        claude, opencode, codex, and more
-Private inference:   add a Tinfoil connection in Monitor
+Private inference:   add Tinfoil in Monitor, then copy its substitution key:
+                     monitor enable tinfoil <substitution-key>
 
 Need another tool? Try nix run nixpkgs#hello or nix shell nixpkgs#jq.
 
