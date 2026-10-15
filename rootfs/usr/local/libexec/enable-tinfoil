@@ -1,0 +1,31 @@
+#!/bin/bash
+set -euo pipefail
+
+if [[ $# != 1 || ! $1 =~ ^tfm_tinfoil_[a-zA-Z0-9_]+$ ]]; then
+    printf '%s\n' 'Usage: monitor enable tinfoil <substitution-key>' \
+        'Copy the tfm_tinfoil_ substitution key from the tinfoil connection in Monitor.' >&2
+    exit 2
+fi
+
+for file in \
+    /etc/opencode/opencode.json \
+    /etc/crush/crush.json \
+    /etc/qwen-code/system-defaults.json \
+    "$HOME/.codex/tinfoil.config.toml" \
+    "$HOME/.config/goose/custom_providers/tinfoil.json" \
+    "$HOME/.pi/agent/models.json" \
+    "$HOME/.factory/settings.json"
+do
+    if [[ ! -f $file || -L $file ]]; then
+        printf 'Skipped missing or linked config: %s\n' "$file" >&2
+        continue
+    fi
+    if [[ $file == /etc/* ]]; then
+        sudo -n sed -i -E "s/tfm_tinfoil_[a-zA-Z0-9_]+/$1/g" "$file"
+    else
+        sed -i -E "s/tfm_tinfoil_[a-zA-Z0-9_]+/$1/g" "$file"
+    fi
+done
+
+printf '%s\n' 'Tinfoil substitution key updated. Choose Tinfoil in your harness.' \
+    'Restart running harnesses to reload settings.'

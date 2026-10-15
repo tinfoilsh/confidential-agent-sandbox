@@ -88,13 +88,14 @@ COPY --from=build /workspace-attestation /usr/local/libexec/workspace-attestatio
 ARG SANDBOX_VERSION=dev
 RUN sed -i "s/<VERSION>/${SANDBOX_VERSION}/" /etc/motd \
     && chmod 0440 /etc/sudoers.d/90-sandbox \
-    && chmod 0755 /usr/local/libexec/workspace-keys /usr/local/bin/workspace-unlock /usr/local/bin/monitor /usr/local/libexec/seed-agent-skills /usr/local/libexec/seed-agent-config \
-    && for script in /entrypoint /healthcheck.sh /usr/local/libexec/seed-agent-skills /etc/profile.d/zz-monitor.sh; do \
+    && chmod 0755 /usr/local/libexec/workspace-keys /usr/local/bin/workspace-unlock /usr/local/bin/monitor /usr/local/libexec/seed-agent-skills /usr/local/libexec/seed-agent-config /usr/local/libexec/enable-tinfoil \
+    && for script in /entrypoint /healthcheck.sh /usr/local/libexec/seed-agent-skills /usr/local/libexec/enable-tinfoil /etc/profile.d/zz-monitor.sh; do \
          bash -n "$script" || exit 1; \
        done \
     && /usr/local/bin/monitor run --help > /dev/null \
     && /usr/local/bin/monitor mcp serve --help > /dev/null \
-    && /usr/local/bin/monitor network --help > /dev/null
+    && /usr/local/bin/monitor network --help > /dev/null \
+    && /usr/local/bin/monitor enable --help > /dev/null
 
 RUN systemctl disable ssh.socket \
     && systemctl enable ssh.service docker.service cron.service monitor-network.service monitor-reverse.service workspace-attestation.service \
