@@ -84,6 +84,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SANDBOX_VERSION=${{ inputs.version }}
           # A plain manifest, so the digest pinned in tinfoil-config.yml names
           # the image itself rather than an index over it and its attestations.
           provenance: false

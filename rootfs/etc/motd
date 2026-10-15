@@ -1,0 +1,12 @@
+▄▖▘  ▐▘  ▘▜
+▐ ▌▛▌▜▘▛▌▌▐
+▐ ▌▌▌▐ ▙▌▌▐▖ Sandbox <VERSION>
+
+Welcome to your sandbox!
+
+Manage connectivity: tinfoil monitor open <name> (on your computer)
+Start coding:        claude, opencode, codex, and more
+Private inference:   add a Tinfoil connection in Monitor
+
+Need another tool? Try nix run nixpkgs#hello or nix shell nixpkgs#jq.
+

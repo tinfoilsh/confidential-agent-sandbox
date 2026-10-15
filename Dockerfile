@@ -62,6 +62,8 @@ RUN yes | DEBIAN_FRONTEND=noninteractive unminimize \
       '[ "$(id -u)" = 0 ] || export NIX_CONFIG="store = daemon"' \
       > /etc/profile.d/nix.sh \
     && rm -f /etc/ssh/ssh_host_* \
+    # PAM displays our static /etc/motd instead of Ubuntu's generated welcome.
+    && rm -f /etc/update-motd.d/* /run/motd.dynamic \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL --retry 3 "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" -o /tmp/docker.tgz \
@@ -83,7 +85,9 @@ RUN curl -fsSL --retry 3 "https://github.com/SagerNet/sing-box/releases/download
 COPY --chmod=0755 entrypoint.sh /entrypoint
 COPY rootfs/ /
 COPY --from=build /workspace-attestation /usr/local/libexec/workspace-attestation
-RUN chmod 0440 /etc/sudoers.d/90-sandbox \
+ARG SANDBOX_VERSION=dev
+RUN sed -i "s/<VERSION>/${SANDBOX_VERSION}/" /etc/motd \
+    && chmod 0440 /etc/sudoers.d/90-sandbox \
     && chmod 0755 /usr/local/libexec/workspace-keys /usr/local/bin/workspace-unlock /usr/local/bin/monitor /usr/local/libexec/seed-agent-skills /usr/local/libexec/seed-agent-config \
     && for script in /entrypoint /healthcheck.sh /usr/local/libexec/seed-agent-skills /etc/profile.d/zz-monitor.sh; do \
          bash -n "$script" || exit 1; \
