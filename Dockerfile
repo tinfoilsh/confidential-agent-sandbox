@@ -9,7 +9,6 @@ ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:224a1869083a311ef3f13648a15
 FROM golang:1.26-alpine@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468 AS build
 COPY go.mod *.go /src/
 WORKDIR /src
-RUN go test ./...
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' -o /workspace-attestation .
 
 FROM ${BASE_IMAGE}

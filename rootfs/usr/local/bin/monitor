@@ -4,6 +4,7 @@
 import argparse
 import contextlib
 import fnmatch
+import functools
 import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -224,9 +225,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
 
 class ForwardHandler(socketserver.BaseRequestHandler):
+    def __init__(self, *args, host):
+        self.host = host
+        super().__init__(*args)
+
     def handle(self):
         try:
-            with self.server.session.stream("mcp.monitor", 80, route=False) as upstream:
+            with self.server.session.stream(self.host, 80, route=False) as upstream:
                 relay(self.request, upstream)
         except (OSError, MonitorError):
             pass  # EOF tells the MCP client that its request did not complete.
@@ -491,7 +496,8 @@ def credential_environment(connections):
     for connection in sorted(connections, key=lambda c: c["name"]):
         for variable, value in sorted(connection["placeholders"].items()):
             name = connection["name"]
-            if value != f"tfm_{name}_{variable}":
+            # Discovery owns the value; accept opaque references and those from older monitors.
+            if not isinstance(value, str) or not re.fullmatch(r"tfm_[A-Za-z0-9_-]+", value):
                 raise MonitorError(f"invalid placeholder for {name}.{variable}")
             qualified = "MONITOR_CREDENTIAL_" + re.sub(r"[^A-Z0-9_]", "_", f"{name}_{variable}".upper())
             entry = (name, variable, value, qualified)
@@ -671,6 +677,31 @@ def mcp_probe(host, port, timeout):
         seen.add(cursor)
 
 
+def mcp_servers(session, address=("127.0.0.1", 0)):
+    connections = [c for c in session.client.connections() if c["kind"] == "mcp"]
+    if not connections:
+        raise MonitorError("no reachable MCP connections; an HTTP API account alone does not provide MCP tools")
+    servers, tools = {}, 0
+    for connection in connections:
+        name = connection["name"]
+        if connection["state"] != "ready":
+            print(f"monitor: MCP connection {name} is {connection['state']}", file=sys.stderr)
+            continue
+        port = address[1] + len(servers) if address[1] else 0
+        if port > 65535:
+            raise MonitorError("not enough consecutive ports; use --listen with port 0")
+        port = session.listen((address[0], port), functools.partial(ForwardHandler, host=f"{name}.monitor"))
+        count = mcp_probe(address[0], port, session.client.timeout)
+        host = f"[{address[0]}]" if ":" in address[0] else address[0]
+        url = f"http://{host}:{port}/"
+        servers[name] = {"type": "http", "url": url}
+        tools += count
+        print(f"monitor: MCP {name} ready at {url} ({count} tools)", file=sys.stderr, flush=True)
+    if not servers:
+        raise MonitorError("no MCP connections are ready")
+    return servers, tools
+
+
 def managed_command(client, args):
     if args.command == "run":
         command = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
@@ -680,18 +711,7 @@ def managed_command(client, args):
         address = loopback_address(args.listen)
     with Session(client) as session:
         if args.command == "mcp":
-            connections = [c for c in client.connections() if c["kind"] == "mcp"]
-            if not connections:
-                raise MonitorError("no reachable MCP connections; an HTTP API account alone does not provide MCP tools")
-            for connection in connections:
-                if connection["state"] != "ready":
-                    print(f"monitor: MCP connection {connection['name']} is {connection['state']}", file=sys.stderr)
-            if not any(c["state"] == "ready" for c in connections):
-                raise MonitorError("no MCP connections are ready")
-            port = session.listen(address, ForwardHandler)
-            count = mcp_probe(address[0], port, client.timeout)
-            host = f"[{address[0]}]" if ":" in address[0] else address[0]
-            print(f"monitor: MCP ready at http://{host}:{port}/ ({count} tools)", file=sys.stderr, flush=True)
+            _, count = mcp_servers(session, address)
             if not count:
                 print("monitor: no tools are visible; check account access and tool review in the web app", file=sys.stderr)
             while True:
