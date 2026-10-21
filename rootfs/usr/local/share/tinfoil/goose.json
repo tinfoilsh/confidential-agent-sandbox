@@ -4,9 +4,9 @@
   "display_name": "Tinfoil through Monitor",
   "description": "Kimi K3 via Monitor's attested Tinfoil connector",
   "api_key_env": "",
-  "base_url": "https://inference.tinfoil.sh/v1/chat/completions",
+  "base_url": "http://tinfoil.monitor/v1/chat/completions",
   "models": [{"name": "kimi-k3", "context_limit": 256000}],
-  "headers": {"Authorization": "Bearer tfm_tinfoil_TINFOIL_API_KEY"},
+  "headers": {"Authorization": "Bearer monitor"},
   "supports_streaming": true,
   "requires_auth": false
 }

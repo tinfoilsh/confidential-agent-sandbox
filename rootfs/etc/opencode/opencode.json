@@ -5,8 +5,8 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "Tinfoil through Monitor",
       "options": {
-        "baseURL": "https://inference.tinfoil.sh/v1",
-        "apiKey": "tfm_tinfoil_TINFOIL_API_KEY"
+        "baseURL": "http://tinfoil.monitor/v1",
+        "apiKey": "monitor"
       },
       "models": {
         "kimi-k3": {

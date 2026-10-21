@@ -3,8 +3,8 @@
     "tinfoil": {
       "name": "Tinfoil through Monitor",
       "type": "openai-compat",
-      "base_url": "https://inference.tinfoil.sh/v1",
-      "api_key": "tfm_tinfoil_TINFOIL_API_KEY",
+      "base_url": "http://tinfoil.monitor/v1",
+      "api_key": "monitor",
       "models": [
         {
           "id": "kimi-k3",

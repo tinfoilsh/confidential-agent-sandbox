@@ -1,8 +1,8 @@
 {
   "apiKeyHelper": "",
   "env": {
-    "ANTHROPIC_BASE_URL": "https://inference.tinfoil.sh",
-    "ANTHROPIC_AUTH_TOKEN": "tfm_tinfoil_TINFOIL_API_KEY",
+    "ANTHROPIC_BASE_URL": "http://tinfoil.monitor",
+    "ANTHROPIC_AUTH_TOKEN": "monitor",
     "ANTHROPIC_API_KEY": "",
     "ANTHROPIC_MODEL": "kimi-k3",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "kimi-k3",

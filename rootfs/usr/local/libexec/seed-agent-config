@@ -1,14 +1,16 @@
 #!/usr/bin/python3 -I
-"""Add optional Tinfoil providers after mounting home; keep user selections."""
+"""Add Tinfoil providers and Monitor web search; keep user selections."""
 
 import hashlib
 import json
 import os
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 TEMPLATES = Path("/usr/local/share/tinfoil")
+WEBSEARCH_URL = "http://tinfoil-websearch.monitor/mcp"
 
 # Exact bytes written by seed-agent-config in sandbox v0.1.17 (3f04860).
 # Only remove untouched generated defaults; edited files belong to the user.
@@ -30,16 +32,24 @@ def create(path, content):
         output.write(content)
 
 
-def add_provider(path, template, key):
-    """Pi and Droid only load providers from their user's shared settings file."""
-    if not path.exists() and not path.is_symlink():
-        create(path, template.read_text())
-        return
+def update_json(path, update):
     try:
         if path.is_symlink():
             raise ValueError("symlink")
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text()) if path.exists() else {}
         before = json.dumps(data)
+        update(data)
+        if before == json.dumps(data):
+            return
+    except (OSError, ValueError, AttributeError, TypeError) as error:
+        print(f"seed-agent-config: preserving {path}: {error}", file=sys.stderr)
+        return
+    write_settings(path, json.dumps(data, indent=2) + "\n")
+
+
+def add_provider(path, template, key):
+    """Pi and Droid only load providers from their user's shared settings file."""
+    def update(data):
         provider = json.loads(template.read_text())[key]
         if key == "providers":
             data.setdefault(key, {}).setdefault("tinfoil", provider["tinfoil"])
@@ -54,20 +64,41 @@ def add_provider(path, template, key):
                 for m in models
             ):
                 models.append(model)
-        if before == json.dumps(data):
-            return
-    except (OSError, ValueError, AttributeError, TypeError) as error:
-        print(f"seed-agent-config: preserving {path}: {error}", file=sys.stderr)
-        return
+    update_json(path, update)
+
+
+def write_settings(path, content):
     # Do not leave partial user settings if boot is interrupted.
+    path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as output:
         temporary = Path(output.name)
         try:
-            output.write(json.dumps(data, indent=2) + "\n")
+            output.write(content)
             output.close()
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def add_codex_mcp(path):
+    try:
+        if path.is_symlink():
+            raise ValueError("symlink")
+        content = path.read_text() if path.exists() else ""
+        settings = tomllib.loads(content)
+        if "tinfoil_websearch" in settings.get("mcp_servers", {}):
+            return
+        content += (
+            '\n[mcp_servers.tinfoil_websearch]\n'
+            f'url = "{WEBSEARCH_URL}"\n'
+            'startup_timeout_sec = 30\n'
+            'tool_timeout_sec = 300\n'
+        )
+        tomllib.loads(content)
+    except (OSError, ValueError, TypeError) as error:
+        print(f"seed-agent-config: preserving {path}: {error}", file=sys.stderr)
+        return
+    write_settings(path, content)
 
 
 def seed(directory, templates=TEMPLATES):
@@ -96,6 +127,24 @@ def seed(directory, templates=TEMPLATES):
     add_provider(
         directory / ".factory/settings.json", templates / "droid.json", "customModels"
     )
+    if os.environ.get("NO_MONITOR") != "1":
+        # Virtual .monitor hosts have no direct-network fallback. The SSH tunnel
+        # authenticates the sandbox; Monitor holds the key and attests the MCP server.
+        add_codex_mcp(directory / ".codex/config.toml")
+        add_codex_mcp(directory / ".codex/tinfoil.config.toml")
+        for relative in (".claude.json", ".factory/mcp.json"):
+            update_json(
+                directory / relative,
+                lambda data: data.setdefault("mcpServers", {}).setdefault(
+                    "tinfoil_websearch", {"type": "http", "url": WEBSEARCH_URL}
+                ),
+            )
+        update_json(
+            directory / ".config/opencode/opencode.json",
+            lambda data: data.setdefault("mcp", {}).setdefault(
+                "tinfoil_websearch", {"type": "remote", "url": WEBSEARCH_URL, "enabled": True, "timeout": 30000}
+            ),
+        )
 
 
 if __name__ == "__main__":
