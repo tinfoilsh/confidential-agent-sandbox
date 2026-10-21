@@ -1,9 +1,9 @@
 {
   "providers": {
     "tinfoil": {
-      "baseUrl": "https://inference.tinfoil.sh/v1",
+      "baseUrl": "http://tinfoil.monitor/v1",
       "api": "openai-completions",
-      "apiKey": "tfm_tinfoil_TINFOIL_API_KEY",
+      "apiKey": "monitor",
       "models": [
         {
           "id": "kimi-k3",

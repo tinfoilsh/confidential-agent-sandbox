@@ -678,7 +678,7 @@ def mcp_probe(host, port, timeout):
 
 
 def mcp_servers(session, address=("127.0.0.1", 0)):
-    connections = [c for c in session.client.connections() if c["kind"] == "mcp"]
+    connections = [c for c in session.client.connections() if c["kind"] in ("mcp", "tinfoil-mcp")]
     if not connections:
         raise MonitorError("no reachable MCP connections; an HTTP API account alone does not provide MCP tools")
     servers, tools = {}, 0

@@ -1,12 +1,12 @@
 {
   "$version": 4,
-  "env": {"MONITOR_TINFOIL_API_KEY": "tfm_tinfoil_TINFOIL_API_KEY"},
+  "env": {"MONITOR_TINFOIL_API_KEY": "monitor"},
   "modelProviders": {
     "openai": [
       {
         "id": "kimi-k3",
         "name": "Tinfoil / Kimi K3",
-        "baseUrl": "https://inference.tinfoil.sh/v1",
+        "baseUrl": "http://tinfoil.monitor/v1",
         "envKey": "MONITOR_TINFOIL_API_KEY",
         "generationConfig": {"contextWindowSize": 256000}
       }
