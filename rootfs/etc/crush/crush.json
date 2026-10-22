@@ -3,7 +3,7 @@
     "tinfoil": {
       "name": "Tinfoil through Monitor",
       "type": "openai-compat",
-      "base_url": "http://tinfoil.monitor/v1",
+      "base_url": "https://tinfoil.monitor/v1",
       "api_key": "monitor",
       "models": [
         {

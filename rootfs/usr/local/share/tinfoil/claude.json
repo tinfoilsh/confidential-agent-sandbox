@@ -1,7 +1,7 @@
 {
   "apiKeyHelper": "",
   "env": {
-    "ANTHROPIC_BASE_URL": "http://tinfoil.monitor",
+    "ANTHROPIC_BASE_URL": "https://tinfoil.monitor",
     "ANTHROPIC_AUTH_TOKEN": "monitor",
     "ANTHROPIC_API_KEY": "",
     "ANTHROPIC_MODEL": "kimi-k3",

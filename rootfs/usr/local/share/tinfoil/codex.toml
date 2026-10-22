@@ -5,7 +5,7 @@ model_auto_compact_token_limit = 200000
 
 [model_providers.tinfoil]
 name = "Tinfoil through Monitor"
-base_url = "http://tinfoil.monitor/v1"
+base_url = "https://tinfoil.monitor/v1"
 experimental_bearer_token = "monitor"
 wire_api = "responses"
 requires_openai_auth = false

@@ -3,7 +3,7 @@
     {
       "model": "kimi-k3",
       "displayName": "Kimi K3 (Tinfoil through Monitor)",
-      "baseUrl": "http://tinfoil.monitor/v1",
+      "baseUrl": "https://tinfoil.monitor/v1",
       "apiKey": "monitor",
       "provider": "generic-chat-completion-api",
       "maxOutputTokens": 65536

@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SEED = runpy.run_path(str(ROOT / "rootfs/usr/local/libexec/seed-agent-config"))
-URL = "http://tinfoil-websearch.monitor/mcp"
+URL = "https://tinfoil-websearch.monitor/mcp"
 
 
 class AgentConfigTest(unittest.TestCase):
@@ -35,6 +35,8 @@ class AgentConfigTest(unittest.TestCase):
         codex = tomllib.loads((self.home / ".codex/config.toml").read_text())
         self.assertEqual(codex["mcp_servers"]["tinfoil_websearch"]["url"], URL)
         self.assertNotIn("model_provider", codex)
+        provider = tomllib.loads((self.home / ".codex/tinfoil.config.toml").read_text())
+        self.assertEqual(provider["model_providers"]["tinfoil"]["base_url"], "https://tinfoil.monitor/v1")
         for name in (".claude.json", ".factory/mcp.json"):
             cfg = json.loads((self.home / name).read_text())
             self.assertEqual(cfg["mcpServers"]["tinfoil_websearch"], {"type": "http", "url": URL})
