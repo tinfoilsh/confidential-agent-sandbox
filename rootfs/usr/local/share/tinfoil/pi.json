@@ -1,7 +1,7 @@
 {
   "providers": {
     "tinfoil": {
-      "baseUrl": "http://tinfoil.monitor/v1",
+      "baseUrl": "https://tinfoil.monitor/v1",
       "api": "openai-completions",
       "apiKey": "monitor",
       "models": [

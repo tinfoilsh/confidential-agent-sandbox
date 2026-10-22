@@ -10,7 +10,7 @@ import tomllib
 from pathlib import Path
 
 TEMPLATES = Path("/usr/local/share/tinfoil")
-WEBSEARCH_URL = "http://tinfoil-websearch.monitor/mcp"
+WEBSEARCH_URL = "https://tinfoil-websearch.monitor/mcp"
 
 # Exact bytes written by seed-agent-config in sandbox v0.1.17 (3f04860).
 # Only remove untouched generated defaults; edited files belong to the user.

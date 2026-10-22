@@ -5,7 +5,7 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "Tinfoil through Monitor",
       "options": {
-        "baseURL": "http://tinfoil.monitor/v1",
+        "baseURL": "https://tinfoil.monitor/v1",
         "apiKey": "monitor"
       },
       "models": {

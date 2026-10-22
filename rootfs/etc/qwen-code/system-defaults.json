@@ -6,7 +6,7 @@
       {
         "id": "kimi-k3",
         "name": "Tinfoil / Kimi K3",
-        "baseUrl": "http://tinfoil.monitor/v1",
+        "baseUrl": "https://tinfoil.monitor/v1",
         "envKey": "MONITOR_TINFOIL_API_KEY",
         "generationConfig": {"contextWindowSize": 256000}
       }
