@@ -44,7 +44,9 @@ jobs:
           PY
           gh attestation verify "$(cat runtime-manifest-path)" \
             --repo tinfoilsh/cvmimage \
-            --predicate-type https://tinfoil.sh/predicate/snp-tdx-multiplatform/v2
+            --predicate-type https://slsa.dev/provenance/v1 \
+            --signer-workflow tinfoilsh/cvmimage/.github/workflows/release.yml \
+            --source-ref "refs/tags/$(jq -r '.version' "$(cat runtime-manifest-path)")"
       - name: Attest the release template
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
