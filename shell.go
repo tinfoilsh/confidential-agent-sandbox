@@ -79,6 +79,7 @@ type shellSession struct {
 
 	input   sync.Mutex
 	nextSeq uint64
+	last    shellReply // The reply to input nextSeq-1, repeated for its retry.
 
 	mu      sync.Mutex
 	changed chan struct{} // Closed and replaced on every change.
@@ -99,6 +100,9 @@ func (sh *shells) serve(ctx context.Context, in shellInput) (shellReply, error) 
 	sh.mu.Lock()
 	s := sh.sessions[in.ID]
 	sh.mu.Unlock()
+	if s == nil && in.Action == "close" {
+		return shellReply{ID: in.ID, Data: []byte{}, Closed: true}, nil
+	}
 	if s == nil {
 		return shellReply{}, errShellGone
 	}
@@ -202,6 +206,9 @@ func (sh *shells) drop(id string, s *shellSession) {
 func (s *shellSession) write(seq uint64, data []byte) (shellReply, error) {
 	s.input.Lock()
 	defer s.input.Unlock()
+	if seq+1 == s.nextSeq {
+		return s.last, nil
+	}
 	if seq != s.nextSeq {
 		return shellReply{}, errShellSequence
 	}
@@ -222,6 +229,7 @@ func (s *shellSession) write(seq uint64, data []byte) (shellReply, error) {
 		s.close()
 		reply.Closed = true
 	}
+	s.last = reply
 	return reply, nil
 }
 

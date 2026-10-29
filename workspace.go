@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -23,7 +24,6 @@ const (
 	agentIdentityFile = "identity"
 	monitorPinFile    = "known_hosts"
 	monitorPinHost    = "monitor "
-	maxCommandReply   = 1 << 12
 	// Formatting a new workspace can take minutes.
 	unlockTimeout = 10 * time.Minute
 )
@@ -31,7 +31,6 @@ const (
 var (
 	volumeStates        = []string{"unlocked", "locked_blank", "locked_initialized", "locked_unknown"}
 	errIdentityConflict = ownerError{"identity_conflict", http.StatusConflict}
-	errIdentityMissing  = ownerError{"identity_missing", http.StatusConflict}
 )
 
 // workspace owns this boot's Monitor credentials in /run/monitor and its volume unlock.
@@ -61,10 +60,6 @@ type enrollInput struct {
 	AllowInitialize bool   `json:"allow_initialize"`
 }
 
-type relinkInput struct {
-	MonitorHostKey string `json:"monitor_host_key"`
-}
-
 // status reports the volume as mounted or as the volume worker sees it, never inferred
 // from missing files, and the agent identity and Monitor pin this boot holds.
 func (w *workspace) status(ctx context.Context) (status, error) {
@@ -90,14 +85,15 @@ func (w *workspace) status(ctx context.Context) (status, error) {
 }
 
 // enroll installs the agent identity and Monitor pin, then unlocks the volume with the
-// disk key. Initializing is left to the volume worker, which refuses a nonblank disk.
+// disk key. Re-enrolling the same identity only repins a restarted Monitor. Initializing
+// is left to the volume worker, which refuses a nonblank disk.
 func (w *workspace) enroll(ctx context.Context, in enrollInput) (status, error) {
-	seed, seedErr := decodeB64U(in.AgentSeed, ed25519.SeedSize)
-	disk, diskErr := decodeB64U(in.DiskKey, 32)
+	seed, seedErr := base64.RawURLEncoding.DecodeString(in.AgentSeed)
+	disk, diskErr := base64.RawURLEncoding.DecodeString(in.DiskKey)
 	defer clear(seed)
 	defer clear(disk)
 	pin, pinErr := monitorPin(in.MonitorHostKey)
-	if seedErr != nil || diskErr != nil || pinErr != nil {
+	if seedErr != nil || diskErr != nil || pinErr != nil || len(seed) != ed25519.SeedSize || len(disk) != 32 {
 		return status{}, errors.New("enroll needs a 32-byte agent_seed and disk_key and an ssh-ed25519 monitor_host_key")
 	}
 	agent := ed25519.NewKeyFromSeed(seed)
@@ -144,32 +140,6 @@ func (w *workspace) enroll(ctx context.Context, in enrollInput) (status, error) 
 	return w.status(ctx)
 }
 
-// relink replaces only the Monitor pin of an existing identity; it never creates an
-// identity or touches storage.
-func (w *workspace) relink(ctx context.Context, in relinkInput) (status, error) {
-	pin, err := monitorPin(in.MonitorHostKey)
-	if err != nil {
-		return status{}, err
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	existing, err := w.identity()
-	if err != nil {
-		return status{}, err
-	}
-	if existing == nil {
-		return status{}, errIdentityMissing
-	}
-	changed, err := w.install(monitorPinFile, pin)
-	if err == nil && changed {
-		err = w.network(ctx)
-	}
-	if err != nil {
-		return status{}, err
-	}
-	return w.status(ctx)
-}
-
 // identity is the installed agent identity, or nil.
 func (w *workspace) identity() (ssh.Signer, error) {
 	data, err := os.ReadFile(filepath.Join(w.monitor, agentIdentityFile))
@@ -208,12 +178,11 @@ func (w *workspace) install(name string, data []byte) (bool, error) {
 	return err == nil, err
 }
 
-// run invokes workspace-unlock with input on stdin and returns its bounded output.
+// run invokes workspace-unlock with input on stdin and returns its output.
 func (w *workspace) run(ctx context.Context, input []byte, args ...string) (string, error) {
-	var output limitedReply
 	command := exec.CommandContext(ctx, w.unlock, args...)
-	command.Stdin, command.Stdout, command.Stderr = bytes.NewReader(input), &output, &output
-	err := command.Run()
+	command.Stdin = bytes.NewReader(input)
+	output, err := command.CombinedOutput()
 	return strings.ToValidUTF8(string(output), ""), err
 }
 
@@ -228,11 +197,4 @@ func monitorPin(key string) ([]byte, error) {
 
 func authorizedKey(key ssh.PublicKey) string {
 	return strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(key)), "\n")
-}
-
-type limitedReply []byte
-
-func (b *limitedReply) Write(p []byte) (int, error) {
-	*b = append(*b, p[:min(len(p), maxCommandReply-len(*b))]...)
-	return len(p), nil
 }
