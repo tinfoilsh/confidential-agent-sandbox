@@ -26,10 +26,17 @@ jobs:
     permissions:
       contents: read    # checkout + check the tag does not exist
       packages: write   # push the container image
+      id-token: write
+      attestations: write
     outputs:
       digest: ${{ steps.build.outputs.digest }}
 
     steps:
+      - name: Require public image provenance
+        if: github.event.repository.visibility != 'public'
+        run: |
+          echo "::error::Make the repository public before building release image provenance."
+          exit 1
       - name: Checkout repository
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
@@ -89,6 +96,12 @@ jobs:
           # the image itself rather than an index over it and its attestations.
           provenance: false
           sbom: false
+
+      - name: Attest the pushed image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
 
   prepare-release:
     needs: build
