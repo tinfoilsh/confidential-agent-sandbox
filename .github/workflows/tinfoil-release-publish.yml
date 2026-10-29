@@ -3,11 +3,6 @@ run-name: Publish ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
-    inputs:
-      build_run_id:
-        description: 'tinfoil-release.yml run that built and attested the pinned image'
-        required: true
-        type: string
 
 concurrency:
   group: tinfoil-container-publish-${{ github.ref_name }}
@@ -20,8 +15,6 @@ jobs:
       contents: write
       id-token: write
       attestations: write
-      actions: read
-      packages: read
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
@@ -54,38 +47,6 @@ jobs:
             --predicate-type https://slsa.dev/provenance/v1 \
             --signer-workflow tinfoilsh/cvmimage/.github/workflows/release.yml \
             --source-ref "refs/tags/$(jq -r '.version' "$(cat runtime-manifest-path)")"
-      - name: Log in to GHCR
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Verify the pinned image's build attestation
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          RUN_ID: ${{ inputs.build_run_id }}
-        run: |
-          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || exit 1
-          gh api "repos/$GH_REPO/actions/runs/$RUN_ID" > build-run.json
-          gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" > build-jobs.json
-          jq -e --arg repo "$GH_REPO" '.path == ".github/workflows/tinfoil-release.yml" and .event == "workflow_dispatch" and .head_branch == "main" and .repository.full_name == $repo and .head_repository.full_name == $repo' build-run.json
-          jq -e '[.jobs[] | select(.name == "build" and .conclusion == "success")] | length == 1' build-jobs.json
-          source=$(jq -r .head_sha build-run.json)
-          parents=$(gh api "repos/$GH_REPO/commits/$GITHUB_SHA" --jq '[.parents[].sha] | join(" ")')
-          if [[ "$GITHUB_SHA" != "$source" && "$parents" != "$source" ]]; then
-            echo "::error::Release tag is neither the build source nor its pin commit"
-            exit 1
-          fi
-          mapfile -t pins < <(grep -oE "ghcr\.io/$GH_REPO@sha256:[0-9a-f]{64}" tinfoil-config.yml | sort -u)
-          [[ ${#pins[@]} == 1 ]] || exit 1
-          gh run download "$RUN_ID" --name image-provenance --dir image-provenance
-          gh attestation verify "oci://${pins[0]}" --repo "$GH_REPO" --bundle image-provenance/attestation.json \
-            --cert-identity "https://github.com/$GH_REPO/.github/workflows/tinfoil-release.yml@refs/heads/main" \
-            --signer-digest "$source" --source-ref refs/heads/main --source-digest "$source" \
-            --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners --format json > image-verification.json
-          jq -e --arg run "https://github.com/$GH_REPO/actions/runs/$RUN_ID/attempts/" 'length > 0 and all(.[].verificationResult.signature.certificate; .runInvocationURI | startswith($run))' image-verification.json
-          cp image-provenance/attestation.json image-provenance.sigstore.json
       - name: Attest the release template
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
@@ -108,4 +69,4 @@ jobs:
           fi
           gh release create "$VERSION" --verify-tag "${release_flags[@]}" \
             --title "$VERSION" --notes-file release-notes.md \
-            tinfoil-config.yml tinfoil-config.sha256 "$(cat runtime-manifest-path)" image-provenance.sigstore.json
+            tinfoil-config.yml tinfoil-config.sha256 "$(cat runtime-manifest-path)"

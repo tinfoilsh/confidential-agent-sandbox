@@ -98,19 +98,10 @@ jobs:
           sbom: false
 
       - name: Attest the pushed image
-        id: attest
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.build.outputs.digest }}
-
-      - name: Retain the image attestation for publication
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: image-provenance
-          path: ${{ steps.attest.outputs.bundle-path }}
-          if-no-files-found: error
-          overwrite: true
 
   prepare-release:
     needs: build
@@ -136,6 +127,5 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ inputs.version }}
-          BUILD_RUN_ID: ${{ github.run_id }}
         run: |
-          gh workflow run tinfoil-release-publish.yml --ref "$VERSION" -f build_run_id="$BUILD_RUN_ID"
+          gh workflow run tinfoil-release-publish.yml --ref "$VERSION"
