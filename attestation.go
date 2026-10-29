@@ -21,10 +21,14 @@ func attestationClient(socket string) *http.Client {
 	}
 }
 
-// routeHandler exposes only health and the existing attestation socket.
-func routeHandler(local *http.Client) http.Handler {
+// routeHandler exposes health, the existing attestation socket and, when measured, the
+// owner API, which accepts only EHBP-sealed requests.
+func routeHandler(local *http.Client, owner http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/", healthHandler())
+	if owner != nil {
+		mux.Handle("POST /owner/rpc", owner)
+	}
 	mux.HandleFunc("GET "+attestationPath, func(w http.ResponseWriter, r *http.Request) {
 		request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "http://attestation"+attestationPath+"?"+r.URL.RawQuery, nil)
 		if err != nil {

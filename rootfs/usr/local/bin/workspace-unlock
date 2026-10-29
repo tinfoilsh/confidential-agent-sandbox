@@ -1,35 +1,66 @@
 #!/usr/bin/python3 -I
-"""Send the workspace key on stdin to the CVM volume worker."""
+"""Send the workspace key on stdin to the CVM volume worker, or report the volume state."""
 
 import os
 import socket
+import subprocess
 import sys
 
 CONTROL = "/run/tinfoil/volumes/workspace/control.sock"
+DISK = "/mnt/disk"
+# What a locked volume's worker answers; anything else is unknown, never unused.
+LOCKED = {b"blank": "locked_blank", b"used": "locked_initialized"}
+
+
+def ask(operation, key=b"", timeout=None):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as connection:
+        connection.settimeout(10)
+        connection.connect(CONTROL)
+        connection.sendall(b"\x02" + operation + key)
+        connection.settimeout(timeout)  # Formatting can take minutes.
+        return connection.recv(256)
+
+
+def unlocked():
+    # The worker mounts the unlocked volume as writable ext4.
+    return subprocess.run(["findmnt", "-rn", "-M", DISK, "-t", "ext4", "-O", "rw"], stdout=subprocess.DEVNULL).returncode == 0
+
+
+def status():
+    # The worker serves only while locked, so its absence alone proves nothing.
+    if unlocked():
+        return "unlocked"
+    try:
+        return LOCKED.get(ask(b"s", timeout=10), "locked_unknown")
+    except OSError:
+        return "locked_unknown"
 
 
 def unlock(key, initialize=False):
-    def ask(operation):
-        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as connection:
-            connection.settimeout(10)
-            connection.connect(CONTROL)
-            connection.sendall(b"\x02" + operation + key)
-            connection.settimeout(None)  # Formatting can take minutes.
-            return connection.recv(256)
-
-    status = ask(b"i" if initialize else b"u")
-    if initialize and status == b"rejected":
-        status = ask(b"u")
+    try:
+        status = ask(b"i" if initialize else b"u", key)
+        if initialize and status == b"rejected":
+            status = ask(b"u", key)
+    except OSError:
+        # A previous request may have opened the disk before its reply was lost.
+        if unlocked():
+            return
+        raise
+    if status == b"" and unlocked():
+        return
     if status != b"ok":
         raise ValueError(f"volume worker answered {status!r}")
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] not in ([], ["--initialize"]):
-        sys.exit("usage: workspace-unlock [--initialize] < key")
+    if sys.argv[1:] not in ([], ["--initialize"], ["--status"]):
+        sys.exit("usage: workspace-unlock [--initialize | --status] < key")
     if os.geteuid() != 0:
         os.execv("/usr/bin/sudo", ["sudo", "-n", "--", "/usr/local/bin/workspace-unlock", *sys.argv[1:]])
     try:
-        unlock(sys.stdin.buffer.read(), bool(sys.argv[1:]))
+        if sys.argv[1:] == ["--status"]:
+            print(status())
+        else:
+            unlock(sys.stdin.buffer.read(), bool(sys.argv[1:]))
     except (OSError, ValueError) as error:
         sys.exit(f"workspace-unlock: {error}")

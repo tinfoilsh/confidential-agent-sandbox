@@ -5,6 +5,7 @@ StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/usr/local/libexec/workspace-attestation
+PassEnvironment=SANDBOX_OWNER_PUBLIC_KEY SANDBOX_INSTANCE_ID
 Restart=always
 RestartSec=2s
 
