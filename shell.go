@@ -79,7 +79,8 @@ type shellSession struct {
 
 	input   sync.Mutex
 	nextSeq uint64
-	last    shellReply // The reply to input nextSeq-1, repeated for its retry.
+	last    shellReply    // The reply to input nextSeq-1, repeated for its retry.
+	turn    chan struct{} // Closed and replaced when nextSeq advances.
 
 	mu      sync.Mutex
 	changed chan struct{} // Closed and replaced on every change.
@@ -130,7 +131,7 @@ func (sh *shells) serve(ctx context.Context, in shellInput) (shellReply, error) 
 	if len(in.Data) > maxShellInput {
 		return shellReply{}, fmt.Errorf("shell input is limited to %d bytes per call", maxShellInput)
 	}
-	reply, err := s.write(in.Seq, in.Data)
+	reply, err := s.write(ctx, in.Seq, in.Data)
 	reply.ID = in.ID
 	return reply, err
 }
@@ -182,7 +183,7 @@ func (sh *shells) open(in shellInput) (shellReply, error) {
 		cmd.Wait()
 		return shellReply{}, err
 	}
-	s := &shellSession{pty: terminal, cmd: cmd, changed: make(chan struct{})}
+	s := &shellSession{pty: terminal, cmd: cmd, changed: make(chan struct{}), turn: make(chan struct{})}
 	s.idle = time.AfterFunc(shellIdleTimeout, func() { sh.drop(name, s) })
 	if sh.sessions == nil {
 		sh.sessions = map[string]*shellSession{}
@@ -201,16 +202,30 @@ func (sh *shells) drop(id string, s *shellSession) {
 	s.close()
 }
 
-// write accepts input only in sequence. A short write ends the session, and its count is
-// the reply a retry receives, so no prefix of that input is ever written twice.
-func (s *shellSession) write(seq uint64, data []byte) (shellReply, error) {
+// write accepts input in sequence; input sent ahead of its predecessors waits for them. A
+// short write ends the session, and its count is the reply a retry receives, so no prefix of
+// that input is ever written twice.
+func (s *shellSession) write(ctx context.Context, seq uint64, data []byte) (shellReply, error) {
 	s.input.Lock()
 	defer s.input.Unlock()
+	for seq > s.nextSeq {
+		turn := s.turn
+		s.input.Unlock()
+		select {
+		case <-turn:
+			s.input.Lock()
+		case <-ctx.Done():
+			s.input.Lock()
+			return shellReply{}, errShellSequence
+		}
+	}
 	if seq+1 == s.nextSeq {
 		return s.last, nil
 	}
-	if seq != s.nextSeq {
-		return shellReply{}, errShellSequence
+	if seq < s.nextSeq {
+		// Later input was written, so this input was accepted whole.
+		n := len(data)
+		return shellReply{Data: []byte{}, Accepted: &n}, nil
 	}
 	s.mu.Lock()
 	ended := s.ended
@@ -230,6 +245,8 @@ func (s *shellSession) write(seq uint64, data []byte) (shellReply, error) {
 		reply.Closed = true
 	}
 	s.last = reply
+	close(s.turn)
+	s.turn = make(chan struct{})
 	return reply, nil
 }
 
