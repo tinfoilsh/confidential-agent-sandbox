@@ -29,7 +29,7 @@ const (
 )
 
 var (
-	volumeStates        = []string{"unlocked", "locked_blank", "locked_initialized", "locked_unknown"}
+	volumeStates        = []string{"unlocked", "locked"}
 	errIdentityConflict = ownerError{"identity_conflict", http.StatusConflict}
 )
 
@@ -60,8 +60,8 @@ type enrollInput struct {
 	AllowInitialize bool   `json:"allow_initialize"`
 }
 
-// status reports the volume as mounted or as the volume worker sees it, never inferred
-// from missing files, and the agent identity and Monitor pin this boot holds.
+// status reports whether the volume is mounted, never inferred from missing files, and
+// the agent identity and Monitor pin this boot holds.
 func (w *workspace) status(ctx context.Context) (status, error) {
 	s := status{Protocol: ownerProtocol, InstanceID: w.instance}
 	volume, err := w.run(ctx, nil, "--status")
