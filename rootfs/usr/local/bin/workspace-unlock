@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""Send the workspace key on stdin to the CVM volume worker, or report the volume state."""
+"""Send the workspace key on stdin to the CVM volume worker, or report whether it is unlocked."""
 
 import os
 import socket
@@ -8,16 +8,14 @@ import sys
 
 CONTROL = "/run/tinfoil/volumes/workspace/control.sock"
 DISK = "/mnt/disk"
-# What a locked volume's worker answers; anything else is unknown, never unused.
-LOCKED = {b"blank": "locked_blank", b"used": "locked_initialized"}
 
 
-def ask(operation, key=b"", timeout=None):
+def ask(operation, key):
     with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as connection:
         connection.settimeout(10)
         connection.connect(CONTROL)
         connection.sendall(b"\x02" + operation + key)
-        connection.settimeout(timeout)  # Formatting can take minutes.
+        connection.settimeout(None)  # Formatting can take minutes.
         return connection.recv(256)
 
 
@@ -26,17 +24,8 @@ def unlocked():
     return subprocess.run(["findmnt", "-rn", "-M", DISK, "-t", "ext4", "-O", "rw"], stdout=subprocess.DEVNULL).returncode == 0
 
 
-def status():
-    # The worker serves only while locked, so its absence alone proves nothing.
-    if unlocked():
-        return "unlocked"
-    try:
-        return LOCKED.get(ask(b"s", timeout=10), "locked_unknown")
-    except OSError:
-        return "locked_unknown"
-
-
 def unlock(key, initialize=False):
+    # The worker formats only a blank volume; it rejects initializing any other.
     try:
         status = ask(b"i" if initialize else b"u", key)
         if initialize and status == b"rejected":
@@ -59,7 +48,7 @@ if __name__ == "__main__":
         os.execv("/usr/bin/sudo", ["sudo", "-n", "--", "/usr/local/bin/workspace-unlock", *sys.argv[1:]])
     try:
         if sys.argv[1:] == ["--status"]:
-            print(status())
+            print("unlocked" if unlocked() else "locked")
         else:
             unlock(sys.stdin.buffer.read(), bool(sys.argv[1:]))
     except (OSError, ValueError) as error:
