@@ -26,7 +26,8 @@ import (
 const (
 	ownerRequestContext = "tinfoil owner request v2\x00"
 	ownerProtocol       = "sandbox-owner-v1"
-	// requestWindow is the inclusive age, in milliseconds, of an acceptable request.
+	// requestWindow is how far, in milliseconds, a request's time may be from this
+	// sandbox's clock in either direction.
 	requestWindow = 60_000
 
 	maxNonces     = 1 << 14
@@ -91,7 +92,8 @@ func respond(w http.ResponseWriter, value any, err error) {
 		if errors.As(err, &known) {
 			status = known.status
 		}
-		value = map[string]string{"error": err.Error()}
+		// The sandbox's clock lets an owner whose clock differs re-sign on it.
+		value = map[string]any{"error": err.Error(), "now": time.Now().UnixMilli()}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -167,7 +169,7 @@ func (s *ownerServer) open(raw []byte) (ownerRequest, []byte, error) {
 		return call, nil, errProtocol
 	case call.Resource != s.instance:
 		return call, nil, errResource
-	case now < call.IssuedAt:
+	case call.IssuedAt-now > requestWindow:
 		return call, nil, errFuture
 	case now-call.IssuedAt > requestWindow:
 		return call, nil, errExpired
