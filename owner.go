@@ -5,6 +5,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hpke"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -24,7 +25,7 @@ import (
 )
 
 const (
-	ownerRequestContext = "tinfoil owner request v2\x00"
+	ownerRequestContext = "tinfoil owner request v3\x00"
 	ownerProtocol       = "sandbox-owner-v1"
 	// requestWindow is how far, in milliseconds, a request's time may be from this
 	// sandbox's clock in either direction.
@@ -153,7 +154,8 @@ func (s *ownerServer) open(raw []byte) (ownerRequest, []byte, error) {
 	if requestErr != nil || signatureErr != nil {
 		return call, nil, errMalformed
 	}
-	if !ed25519.Verify(s.key, append([]byte(ownerRequestContext), signed...), signature) {
+	digest := sha256.Sum256(signed)
+	if !ed25519.Verify(s.key, append([]byte(ownerRequestContext), digest[:]...), signature) {
 		return call, nil, errSignature
 	}
 	if json.Unmarshal(signed, &call) != nil {

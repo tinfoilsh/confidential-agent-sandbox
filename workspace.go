@@ -36,7 +36,7 @@ var (
 // workspace owns this boot's Monitor credentials in /run/monitor and its volume unlock.
 type workspace struct {
 	instance string
-	monitor  string // directory of the agent identity and Monitor pin
+	monitor  string // directory of the Monitor identity and Monitor pin
 	uid, gid int    // the sandbox user, who reads both
 	unlock   string // workspace-unlock
 	// network restarts monitor-network once systemd runs it.
@@ -46,22 +46,22 @@ type workspace struct {
 }
 
 type status struct {
-	Protocol       string  `json:"protocol"`
-	InstanceID     string  `json:"instance_id"`
-	Volume         string  `json:"volume"`
-	AgentPublicKey *string `json:"agent_public_key"`
-	MonitorHostKey *string `json:"monitor_host_key"`
+	Protocol        string  `json:"protocol"`
+	InstanceID      string  `json:"instance_id"`
+	Volume          string  `json:"volume"`
+	MonitorIdentity *string `json:"monitor_identity"`
+	MonitorHostKey  *string `json:"monitor_host_key"`
 }
 
 type enrollInput struct {
-	AgentSeed       string `json:"agent_seed"`
-	MonitorHostKey  string `json:"monitor_host_key"`
-	DiskKey         string `json:"disk_key"`
-	AllowInitialize bool   `json:"allow_initialize"`
+	MonitorIdentitySeed string `json:"monitor_identity_seed"`
+	MonitorHostKey      string `json:"monitor_host_key"`
+	DiskKey             string `json:"disk_key"`
+	AllowInitialize     bool   `json:"allow_initialize"`
 }
 
 // status reports whether the volume is mounted, never inferred from missing files, and
-// the agent identity and Monitor pin this boot holds.
+// the Monitor identity and Monitor pin this boot holds.
 func (w *workspace) status(ctx context.Context) (status, error) {
 	s := status{Protocol: ownerProtocol, InstanceID: w.instance}
 	volume, err := w.run(ctx, nil, "--status")
@@ -72,7 +72,7 @@ func (w *workspace) status(ctx context.Context) (status, error) {
 	agent, err := w.identity()
 	if agent != nil {
 		key := authorizedKey(agent.PublicKey())
-		s.AgentPublicKey = &key
+		s.MonitorIdentity = &key
 	}
 	pin, pinErr := os.ReadFile(filepath.Join(w.monitor, monitorPinFile))
 	if pinErr == nil {
@@ -84,17 +84,17 @@ func (w *workspace) status(ctx context.Context) (status, error) {
 	return s, err
 }
 
-// enroll installs the agent identity and Monitor pin, then unlocks the volume with the
+// enroll installs the Monitor identity and Monitor pin, then unlocks the volume with the
 // disk key. Re-enrolling the same identity only repins a restarted Monitor. Initializing
 // is left to the volume worker, which refuses a nonblank disk.
 func (w *workspace) enroll(ctx context.Context, in enrollInput) (status, error) {
-	seed, seedErr := base64.RawURLEncoding.DecodeString(in.AgentSeed)
+	seed, seedErr := base64.RawURLEncoding.DecodeString(in.MonitorIdentitySeed)
 	disk, diskErr := base64.RawURLEncoding.DecodeString(in.DiskKey)
 	defer clear(seed)
 	defer clear(disk)
 	pin, pinErr := monitorPin(in.MonitorHostKey)
 	if seedErr != nil || diskErr != nil || pinErr != nil || len(seed) != ed25519.SeedSize || len(disk) != 32 {
-		return status{}, errors.New("enroll needs a 32-byte agent_seed and disk_key and an ssh-ed25519 monitor_host_key")
+		return status{}, errors.New("enroll needs a 32-byte monitor_identity_seed and disk_key and an ssh-ed25519 monitor_host_key")
 	}
 	agent := ed25519.NewKeyFromSeed(seed)
 	defer clear(agent)
@@ -140,7 +140,7 @@ func (w *workspace) enroll(ctx context.Context, in enrollInput) (status, error) 
 	return w.status(ctx)
 }
 
-// identity is the installed agent identity, or nil.
+// identity is the installed Monitor identity, or nil.
 func (w *workspace) identity() (ssh.Signer, error) {
 	data, err := os.ReadFile(filepath.Join(w.monitor, agentIdentityFile))
 	if errors.Is(err, os.ErrNotExist) {
