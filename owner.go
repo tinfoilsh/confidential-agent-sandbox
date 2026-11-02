@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	ownerProtocol = "sandbox-owner-v2"
+	ownerProtocol = "sandbox-owner-v1"
 	maxOwnerBytes = 512 << 10
 )
 
@@ -62,7 +62,7 @@ func respond(value any, err error) Reply {
 
 func (s *ownerServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var hello ownerHello
-	c, err := Accept(w, r, s.sessionKey, ownerProtocol+"\x00"+s.instance, s.key, &hello)
+	c, err := Accept(w, r, s.sessionKey, ownerProtocol, s.key, &hello)
 	if err != nil {
 		return
 	}
