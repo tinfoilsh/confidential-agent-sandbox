@@ -2,16 +2,15 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
-	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 )
@@ -19,121 +18,85 @@ import (
 const (
 	// maxShellSessions bounds the shells open at once.
 	maxShellSessions = 8
-	// maxShellChunk bounds the output one poll returns.
+	// maxShellChunk bounds the output one message carries.
 	maxShellChunk = 64 << 10
-	// maxShellBuffer bounds the output a shell holds until polls acknowledge it.
-	maxShellBuffer = 1 << 20
 
-	shellTerminal    = "xterm-256color"
-	maxShellInput    = 64 << 10
-	maxTerminalSize  = 1000
-	shellPollTimeout = 25 * time.Second
-	shellIdleTimeout = 2 * time.Minute
+	shellTerminal   = "xterm-256color"
+	maxShellInput   = 64 << 10
+	maxTerminalSize = 1000
 )
 
 // shellWriteTimeout bounds how long a shell may leave its input unread.
 var shellWriteTimeout = 10 * time.Second
 
-var (
-	errShellGone     = ownerError{"the shell session ended or does not exist", http.StatusNotFound}
-	errShellSequence = ownerError{"shell input is out of sequence", http.StatusConflict}
-)
-
 type shellInput struct {
-	Action string `json:"action"`
-	ID     string `json:"id"`
-	Cursor uint64 `json:"cursor"`
-	Data   []byte `json:"data"`
-	Cols   uint32 `json:"cols"`
-	Rows   uint32 `json:"rows"`
-	Seq    uint64 `json:"seq"`
+	Input  []byte `json:"input"`
+	Resize *struct {
+		Cols uint32 `json:"cols"`
+		Rows uint32 `json:"rows"`
+	} `json:"resize"`
 }
 
-type shellReply struct {
-	ID       string `json:"id"`
-	Data     []byte `json:"data"`
-	Cursor   uint64 `json:"cursor"`
-	Closed   bool   `json:"closed"`
-	ExitCode *int   `json:"exit_code,omitempty"`
-	Accepted *int   `json:"accepted,omitempty"`
-}
-
-// shells serves the measured owner's terminals; owner and instance are fixed per boot,
-// so the session ID completes the binding.
+// shells serves the measured owner's terminals, each for as long as its socket.
 type shells struct {
 	// command starts a login shell as the sandbox user.
 	command func() *exec.Cmd
 	// ready refuses shells until the workspace runs under systemd.
 	ready func() error
 
-	mu       sync.Mutex
-	sessions map[string]*shellSession
+	open atomic.Int32
 }
 
-// shellSession is one owner terminal. Output stays buffered until a poll acknowledges
-// it, and a full buffer pauses the shell rather than dropping output.
-type shellSession struct {
-	pty  *os.File
-	cmd  *exec.Cmd
-	idle *time.Timer
-
-	input   sync.Mutex
-	nextSeq uint64
-	last    shellReply    // The reply to input nextSeq-1, repeated for its retry.
-	turn    chan struct{} // Closed and replaced when nextSeq advances.
-
-	mu      sync.Mutex
-	changed chan struct{} // Closed and replaced on every change.
-	output  []byte
-	start   uint64 // The cursor of output[0].
-	ended   bool
-	exit    *int
-}
-
-func (sh *shells) serve(ctx context.Context, in shellInput) (shellReply, error) {
-	switch in.Action {
-	case "open":
-		return sh.open(in)
-	case "poll", "input", "resize", "close":
-	default:
-		return shellReply{}, fmt.Errorf("unknown shell action %q", in.Action)
+// serve streams one shell: input and resizes in, output and then its exit code out. A
+// closed socket, or a shell that stops reading its input, kills the shell.
+func (sh *shells) serve(ctx context.Context, c *Channel, cols, rows uint32) {
+	defer sh.open.Add(-1)
+	terminal, cmd, err := sh.start(cols, rows)
+	if err != nil {
+		c.Conn.Close(websocket.StatusInternalError, err.Error())
+		return
 	}
-	sh.mu.Lock()
-	s := sh.sessions[in.ID]
-	sh.mu.Unlock()
-	if s == nil && in.Action == "close" {
-		return shellReply{ID: in.ID, Data: []byte{}, Closed: true}, nil
-	}
-	if s == nil {
-		return shellReply{}, errShellGone
-	}
-	s.idle.Reset(shellIdleTimeout)
-	reply := shellReply{ID: in.ID, Data: []byte{}}
-	switch in.Action {
-	case "poll":
-		// An ended session stays until closed or idle, so a lost final reply can be polled again.
-		polled, err := s.poll(ctx, in.Cursor)
-		s.idle.Reset(shellIdleTimeout)
-		polled.ID = in.ID
-		return polled, err
-	case "close":
-		sh.drop(in.ID, s)
-		reply.Closed = true
-		return reply, nil
-	case "resize":
-		if !validTerminal(in.Cols, in.Rows) {
-			return shellReply{}, fmt.Errorf("terminal size must be 1-%d columns and rows", maxTerminalSize)
+	go func() {
+		for {
+			var in shellInput
+			message, err := c.Read(ctx, maxShellInput)
+			if err == nil {
+				err = json.Unmarshal(message, &in)
+			}
+			if err == nil && in.Resize != nil && validTerminal(in.Resize.Cols, in.Resize.Rows) {
+				err = control(terminal, func(fd int) error {
+					return unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &unix.Winsize{Row: uint16(in.Resize.Rows), Col: uint16(in.Resize.Cols)})
+				})
+			}
+			if err == nil && len(in.Input) > 0 {
+				if err = terminal.SetWriteDeadline(time.Now().Add(shellWriteTimeout)); err == nil {
+					_, err = terminal.Write(in.Input)
+				}
+			}
+			if err != nil {
+				terminal.Close()
+				cmd.Process.Kill()
+				return
+			}
 		}
-		return reply, control(s.pty, func(fd int) error {
-			return unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &unix.Winsize{Row: uint16(in.Rows), Col: uint16(in.Cols)})
-		})
+	}()
+	buffer := make([]byte, maxShellChunk)
+	for n, err := terminal.Read(buffer); err == nil; n, err = terminal.Read(buffer) {
+		output, _ := json.Marshal(map[string][]byte{"output": buffer[:n]})
+		if c.Write(ctx, output) != nil {
+			break
+		}
 	}
-	if len(in.Data) > maxShellInput {
-		return shellReply{}, fmt.Errorf("shell input is limited to %d bytes per call", maxShellInput)
+	terminal.Close()
+	cmd.Process.Kill()
+	cmd.Wait()
+	exit := map[string]*int{"exit": nil}
+	if code := cmd.ProcessState.ExitCode(); code >= 0 {
+		exit["exit"] = &code
 	}
-	reply, err := s.write(ctx, in.Seq, in.Data)
-	reply.ID = in.ID
-	return reply, err
+	message, _ := json.Marshal(exit)
+	c.Write(ctx, message)
+	c.Conn.Close(websocket.StatusNormalClosure, "")
 }
 
 // control runs fn on a PTY's descriptor without File.Fd, which would make it blocking.
@@ -153,27 +116,23 @@ func validTerminal(cols, rows uint32) bool {
 	return cols > 0 && rows > 0 && cols <= maxTerminalSize && rows <= maxTerminalSize
 }
 
-// open starts a login shell on a PTY once the workspace is unlocked and running.
-func (sh *shells) open(in shellInput) (shellReply, error) {
-	if !validTerminal(in.Cols, in.Rows) {
-		return shellReply{}, fmt.Errorf("terminal size must be 1-%d columns and rows", maxTerminalSize)
+// start counts a shell, which its caller releases, and runs it as a login shell on a PTY
+// once the workspace is unlocked and running.
+func (sh *shells) start(cols, rows uint32) (*os.File, *exec.Cmd, error) {
+	if sh.open.Add(1) > maxShellSessions {
+		return nil, nil, ownerError{fmt.Sprintf("at most %d shells can be open; close one first", maxShellSessions), http.StatusServiceUnavailable}
+	}
+	if !validTerminal(cols, rows) {
+		return nil, nil, fmt.Errorf("terminal size must be 1-%d columns and rows", maxTerminalSize)
 	}
 	if err := sh.ready(); err != nil {
-		return shellReply{}, err
-	}
-	id := make([]byte, 16)
-	rand.Read(id)
-	name := base64.RawURLEncoding.EncodeToString(id)
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
-	if len(sh.sessions) >= maxShellSessions {
-		return shellReply{}, ownerError{fmt.Sprintf("at most %d shells can be open; close one first", maxShellSessions), http.StatusServiceUnavailable}
+		return nil, nil, err
 	}
 	cmd := sh.command()
 	cmd.Env = append(cmd.Env, "TERM="+shellTerminal)
-	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(in.Rows), Cols: uint16(in.Cols)})
+	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
 	if err != nil {
-		return shellReply{}, err
+		return nil, nil, err
 	}
 	// The pty helpers leave the descriptor blocking; the poller needs it nonblocking so
 	// write deadlines and Close interrupt a shell that stops reading.
@@ -181,162 +140,7 @@ func (sh *shells) open(in shellInput) (shellReply, error) {
 		terminal.Close()
 		cmd.Process.Kill()
 		cmd.Wait()
-		return shellReply{}, err
+		return nil, nil, err
 	}
-	s := &shellSession{pty: terminal, cmd: cmd, changed: make(chan struct{}), turn: make(chan struct{})}
-	s.idle = time.AfterFunc(shellIdleTimeout, func() { sh.drop(name, s) })
-	if sh.sessions == nil {
-		sh.sessions = map[string]*shellSession{}
-	}
-	sh.sessions[name] = s
-	go s.relay()
-	return shellReply{ID: name, Data: []byte{}}, nil
-}
-
-func (sh *shells) drop(id string, s *shellSession) {
-	sh.mu.Lock()
-	if sh.sessions[id] == s {
-		delete(sh.sessions, id)
-	}
-	sh.mu.Unlock()
-	s.close()
-}
-
-// write accepts input in sequence; input sent ahead of its predecessors waits for them. A
-// short write ends the session, and its count is the reply a retry receives, so no prefix of
-// that input is ever written twice.
-func (s *shellSession) write(ctx context.Context, seq uint64, data []byte) (shellReply, error) {
-	s.input.Lock()
-	defer s.input.Unlock()
-	for seq > s.nextSeq {
-		turn := s.turn
-		s.input.Unlock()
-		select {
-		case <-turn:
-			s.input.Lock()
-		case <-ctx.Done():
-			s.input.Lock()
-			return shellReply{}, errShellSequence
-		}
-	}
-	if seq+1 == s.nextSeq {
-		return s.last, nil
-	}
-	if seq < s.nextSeq {
-		// Later input was written, so this input was accepted whole.
-		n := len(data)
-		return shellReply{Data: []byte{}, Accepted: &n}, nil
-	}
-	s.mu.Lock()
-	ended := s.ended
-	s.mu.Unlock()
-	if ended {
-		return shellReply{}, errShellGone
-	}
-	s.nextSeq++
-	n, err := 0, s.pty.SetWriteDeadline(time.Now().Add(shellWriteTimeout))
-	if err == nil {
-		n, err = s.pty.Write(data)
-	}
-	reply := shellReply{Data: []byte{}, Accepted: &n}
-	if err != nil {
-		// A shell that stops reading cannot hold the request; it is closed instead.
-		s.close()
-		reply.Closed = true
-	}
-	s.last = reply
-	close(s.turn)
-	s.turn = make(chan struct{})
-	return reply, nil
-}
-
-// signal wakes waiters; the caller holds mu.
-func (s *shellSession) signal() {
-	close(s.changed)
-	s.changed = make(chan struct{})
-}
-
-func (s *shellSession) close() {
-	s.mu.Lock()
-	s.ended = true
-	s.signal()
-	s.mu.Unlock()
-	s.idle.Stop()
-	s.pty.Close()
-	s.cmd.Process.Kill()
-}
-
-func (s *shellSession) relay() {
-	buffer := make([]byte, maxShellChunk)
-	for {
-		n, err := s.pty.Read(buffer)
-		if n > 0 && !s.append(buffer[:n]) || err != nil {
-			break
-		}
-	}
-	err := s.cmd.Wait()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var exit *exec.ExitError
-	if !s.ended && err == nil {
-		s.exit = new(int)
-	} else if !s.ended && errors.As(err, &exit) {
-		code := exit.ExitCode()
-		s.exit = &code
-	}
-	s.ended = true
-	s.signal()
-}
-
-func (s *shellSession) append(p []byte) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// Backpressure bounds unread output.
-	for len(s.output)+len(p) > maxShellBuffer && !s.ended {
-		changed := s.changed
-		s.mu.Unlock()
-		<-changed
-		s.mu.Lock()
-	}
-	if s.ended {
-		return false
-	}
-	s.output = append(s.output, p...)
-	s.signal()
-	return true
-}
-
-// poll acknowledges output before cursor, then waits for more output, the end, or a timeout.
-func (s *shellSession) poll(ctx context.Context, cursor uint64) (shellReply, error) {
-	timeout := time.NewTimer(shellPollTimeout)
-	defer timeout.Stop()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if cursor < s.start || cursor-s.start > uint64(len(s.output)) {
-		return shellReply{}, errors.New("shell cursor is outside the unacknowledged output")
-	}
-	// Cursor advances acknowledge consumption.
-	if cursor > s.start {
-		s.output = s.output[cursor-s.start:]
-		s.start = cursor
-		s.signal()
-	}
-	for wait := true; wait && len(s.output) == 0 && !s.ended; {
-		changed := s.changed
-		s.mu.Unlock()
-		select {
-		case <-changed:
-		case <-ctx.Done():
-			wait = false
-		case <-timeout.C:
-			wait = false
-		}
-		s.mu.Lock()
-	}
-	data := append([]byte{}, s.output[:min(len(s.output), maxShellChunk)]...)
-	reply := shellReply{Data: data, Cursor: cursor + uint64(len(data))}
-	if s.ended && len(data) == len(s.output) {
-		reply.Closed, reply.ExitCode = true, s.exit
-	}
-	return reply, nil
+	return terminal, cmd, nil
 }
