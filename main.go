@@ -1,5 +1,5 @@
 // Command workspace-attestation serves health, public attestation documents and the
-// measured owner's EHBP-sealed API.
+// measured owner's sessions.
 package main
 
 import (
@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	ehbpKeyPath   = "/run/tinfoil/keys/sandbox-ehbp/private_key.pem"
-	sandboxUser   = "sandbox"
-	systemdMarker = "/run/systemd/system"
+	sessionKeyPath = "/run/tinfoil/keys/owner-session/private_key.pem"
+	sandboxUser    = "sandbox"
+	systemdMarker  = "/run/systemd/system"
 )
 
 func main() {
@@ -87,7 +87,7 @@ func ownerAPI() (http.Handler, error) {
 	if !instancePattern.MatchString(instance) {
 		return nil, errors.New("SANDBOX_INSTANCE_ID must be a lowercase UUID")
 	}
-	ehbp, err := loadEHBPKey(ehbpKeyPath)
+	sessionKey, err := LoadKey(sessionKeyPath)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +101,7 @@ func ownerAPI() (http.Handler, error) {
 		return nil, err
 	}
 	systemd := func() bool { _, err := os.Stat(systemdMarker); return err == nil }
-	owner := &ownerServer{key: key, instance: instance, now: time.Now,
+	owner := &ownerServer{key: key, sessionKey: sessionKey, instance: instance,
 		workspace: &workspace{instance: instance, monitor: "/run/monitor", uid: uid, gid: gid, unlock: "/usr/local/bin/workspace-unlock",
 			network: func(ctx context.Context) error {
 				if !systemd() {
@@ -117,5 +117,5 @@ func ownerAPI() (http.Handler, error) {
 				}
 				return nil
 			}}}
-	return sealedOnly(ehbp, owner), nil
+	return owner, nil
 }

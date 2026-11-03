@@ -16,14 +16,14 @@ networks:
 attested-keys:
   - id: host-ssh
     key: ecdsa-p256
-  # Owner requests are EHBP-sealed to this per-boot key, relayed through Monitor.
-  - id: sandbox-ehbp
+  # Owner sessions are Noise handshakes to this per-boot key, relayed through Monitor.
+  - id: owner-session
     key: x25519
 
 volumes:
   - name: workspace
     size: 30GiB
-    # Persistent encrypted disk, opened by the volume key sent to the sealed owner API.
+    # Persistent encrypted disk, opened by the volume key sent over an owner session.
     exec: true
     # The pack is read-only, so a writable store is the volume layered over it.
     overlays:
@@ -49,7 +49,7 @@ containers:
     stop_signal: SIGRTMIN+3
     stop_timeout: 120
     networks: [dev]
-    keys: [host-ssh, sandbox-ehbp]
+    keys: [host-ssh, owner-session]
     models: [nix]
     persistent_volumes: [workspace:/mnt/disk, workspace:/nix]
 
