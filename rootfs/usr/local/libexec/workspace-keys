@@ -22,7 +22,6 @@ def prepare(directory, environment):
     authorized.write_text(owner_key(environment["SANDBOX_OWNER_PUBLIC_KEY"]))
     authorized.chmod(0o644)
     instance = str(uuid.UUID(environment["SANDBOX_INSTANCE_ID"]))
-    (directory / "instance").write_text(instance)
     (directory / "monitor-bootstrap.conf").write_text(f"User sandbox-v2:{instance}\n")
 
 
