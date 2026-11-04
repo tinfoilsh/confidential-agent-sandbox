@@ -11,19 +11,22 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 )
 
 const (
 	agentIdentityFile = "identity"
 	monitorPinFile    = "known_hosts"
 	monitorPinHost    = "monitor "
+	enrollLockFile    = ".enroll.lock"
 	// Formatting a new workspace can take minutes.
 	unlockTimeout = 10 * time.Minute
 )
@@ -41,8 +44,28 @@ type workspace struct {
 	unlock   string // workspace-unlock
 	// network restarts monitor-network once systemd runs it.
 	network func(context.Context) error
+}
 
-	mu sync.Mutex
+func newWorkspace(instance string) (*workspace, error) {
+	if !instancePattern.MatchString(instance) {
+		return nil, errors.New("SANDBOX_INSTANCE_ID must be a lowercase UUID")
+	}
+	account, err := user.Lookup(sandboxUser)
+	if err != nil {
+		return nil, err
+	}
+	uid, uidErr := strconv.Atoi(account.Uid)
+	gid, gidErr := strconv.Atoi(account.Gid)
+	if err := errors.Join(uidErr, gidErr); err != nil {
+		return nil, err
+	}
+	return &workspace{instance: instance, monitor: "/run/monitor", uid: uid, gid: gid, unlock: "/usr/local/bin/workspace-unlock",
+		network: func(ctx context.Context) error {
+			if _, err := os.Stat(systemdMarker); err != nil {
+				return nil
+			}
+			return exec.CommandContext(ctx, "systemctl", "restart", "monitor-network.service").Run()
+		}}, nil
 }
 
 type status struct {
@@ -102,8 +125,18 @@ func (w *workspace) enroll(ctx context.Context, in enrollInput) (status, error) 
 	if err != nil {
 		return status{}, err
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	if err := os.MkdirAll(w.monitor, 0o750); err != nil {
+		return status{}, err
+	}
+	lock, err := os.OpenFile(filepath.Join(w.monitor, enrollLockFile), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return status{}, err
+	}
+	defer lock.Close()
+	// Browser sessions and SSH commands share the same enrollment lock.
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
+		return status{}, err
+	}
 	existing, err := w.identity()
 	if err != nil {
 		return status{}, err

@@ -10,8 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"os/user"
-	"strconv"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -23,7 +22,13 @@ const (
 )
 
 func main() {
-	if err := run(); err != nil {
+	var err error
+	if filepath.Base(os.Args[0]) == ownerCommandName {
+		err = runOwnerCommand(os.Args[1:], os.Stdin, os.Stdout)
+	} else {
+		err = run()
+	}
+	if err != nil {
 		log.Fatal(err)
 	}
 }
@@ -84,31 +89,17 @@ func ownerAPI() (http.Handler, error) {
 		return nil, err
 	}
 	instance := os.Getenv("SANDBOX_INSTANCE_ID")
-	if !instancePattern.MatchString(instance) {
-		return nil, errors.New("SANDBOX_INSTANCE_ID must be a lowercase UUID")
-	}
 	sessionKey, err := LoadKey(sessionKeyPath)
 	if err != nil {
 		return nil, err
 	}
-	account, err := user.Lookup(sandboxUser)
+	work, err := newWorkspace(instance)
 	if err != nil {
-		return nil, err
-	}
-	uid, uidErr := strconv.Atoi(account.Uid)
-	gid, gidErr := strconv.Atoi(account.Gid)
-	if err := errors.Join(uidErr, gidErr); err != nil {
 		return nil, err
 	}
 	systemd := func() bool { _, err := os.Stat(systemdMarker); return err == nil }
 	owner := &ownerServer{key: key, sessionKey: sessionKey, instance: instance,
-		workspace: &workspace{instance: instance, monitor: "/run/monitor", uid: uid, gid: gid, unlock: "/usr/local/bin/workspace-unlock",
-			network: func(ctx context.Context) error {
-				if !systemd() {
-					return nil
-				}
-				return exec.CommandContext(ctx, "systemctl", "restart", "monitor-network.service").Run()
-			}},
+		workspace: work,
 		shells: &shells{
 			command: func() *exec.Cmd { return exec.Command("/usr/sbin/runuser", "-l", sandboxUser) },
 			ready: func() error {

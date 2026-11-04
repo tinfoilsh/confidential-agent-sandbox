@@ -90,6 +90,7 @@ COPY rootfs/ /
 COPY --from=build /workspace-attestation /usr/local/libexec/workspace-attestation
 ARG SANDBOX_VERSION=dev
 RUN sed -i "s/<VERSION>/${SANDBOX_VERSION}/" /etc/motd \
+    && ln -s /usr/local/libexec/workspace-attestation /usr/local/bin/workspace-owner \
     && chmod 0440 /etc/sudoers.d/90-sandbox \
     && chmod 0755 /etc/ca-certificates/update.d/java-fresh \
     && chmod 0755 /usr/local/libexec/workspace-keys /usr/local/bin/workspace-unlock /usr/local/bin/monitor /usr/local/libexec/seed-agent-skills /usr/local/libexec/seed-agent-config /usr/local/libexec/enable-tinfoil \
