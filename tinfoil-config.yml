@@ -1,7 +1,7 @@
 # An Ubuntu workspace with measured CVM-wide administrator access. Connect with
 # native SSH through Monitor after attested disk unlock.
 # Requires a CVM release with 10.254.0.0/24 alias support and host capability 5.
-cvm-version: 0.15.1-rc.14@sha256:6f38091ce8624c0d674f82645f45ba66fa38bea37039cdc817d046fc853cc84e
+cvm-version: 0.15.2-rc.2@sha256:413fda25bd2ad5a2584d581ba7141338062c1bf0d0a1717fd918a43337dae23f
 # cpus: 32
 # memory: 524288
 # gpus: 8
