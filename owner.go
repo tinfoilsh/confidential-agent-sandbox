@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -80,6 +81,17 @@ func (s *ownerServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		c.Conn.Close(websocket.StatusPolicyViolation, errMalformed.Error())
 	}
+}
+
+// serveLocal answers root's calls on the owner socket with the session's routes.
+func (s *ownerServer) serveLocal(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxOwnerBytes))
+	reply := respond(nil, errMalformed)
+	if effect := s.route(Call{Method: r.Method, Path: r.URL.Path, Body: body}); err == nil && effect != nil {
+		reply = respond(effect(r.Context()))
+	}
+	w.WriteHeader(reply.Status)
+	w.Write(reply.Body)
 }
 
 // route binds a call to its effect.

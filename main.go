@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,6 +21,7 @@ const (
 	sessionKeyPath = "/run/tinfoil/keys/owner-session/private_key.pem"
 	sandboxUser    = "sandbox"
 	systemdMarker  = "/run/systemd/system"
+	ownerSocket    = "/run/workspace/owner.sock"
 )
 
 func main() {
@@ -49,7 +51,20 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	defer server.Close()
-	served := make(chan error, 2)
+	socketServer := &http.Server{ReadHeaderTimeout: 10 * time.Second}
+	defer socketServer.Close()
+	served := make(chan error, 3)
+	if owner != nil {
+		socketServer.Handler = http.HandlerFunc(owner.serveLocal)
+		os.Remove(ownerSocket)
+		socket, err := net.Listen("unix", ownerSocket)
+		if err != nil {
+			return err
+		}
+		// The pre-unlock daemon can close after systemd's has replaced the socket.
+		socket.(*net.UnixListener).SetUnlinkOnClose(false)
+		go func() { served <- socketServer.Serve(socket) }()
+	}
 	go func() { served <- server.ListenAndServe() }()
 	go func() { served <- routeServer.ListenAndServe() }()
 	log.Print("workspace attestation service listening")
@@ -61,7 +76,7 @@ func run() error {
 	// Draining lets a request admitted before the systemd handoff reply.
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return errors.Join(server.Shutdown(shutdown), routeServer.Shutdown(shutdown))
+	return errors.Join(server.Shutdown(shutdown), routeServer.Shutdown(shutdown), socketServer.Shutdown(shutdown))
 }
 
 func healthHandler() http.Handler {
@@ -73,7 +88,7 @@ func healthHandler() http.Handler {
 }
 
 // ownerAPI serves the measured owner, or nothing when the launch measured no owner.
-func ownerAPI() (http.Handler, error) {
+func ownerAPI() (*ownerServer, error) {
 	measured := os.Getenv("SANDBOX_OWNER_PUBLIC_KEY")
 	if measured == "" {
 		log.Print("no SANDBOX_OWNER_PUBLIC_KEY is measured; the owner API is disabled")

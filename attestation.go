@@ -23,7 +23,7 @@ func attestationClient(socket string) *http.Client {
 
 // routeHandler exposes health, the existing attestation socket and, when measured, the
 // owner socket.
-func routeHandler(local *http.Client, owner http.Handler) http.Handler {
+func routeHandler(local *http.Client, owner *ownerServer) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/", healthHandler())
 	if owner != nil {
