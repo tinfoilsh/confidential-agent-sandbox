@@ -67,6 +67,7 @@ RUN yes | DEBIAN_FRONTEND=noninteractive unminimize \
     && rm -f /etc/ssh/ssh_host_* \
     # PAM displays our static /etc/motd instead of Ubuntu's generated welcome.
     && rm -f /etc/update-motd.d/* /run/motd.dynamic \
+    && echo 'session optional pam_motd.so noupdate' >> /etc/pam.d/runuser-l \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL --retry 3 "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" -o /tmp/docker.tgz \
