@@ -97,6 +97,7 @@ if "$local_mode" || [[ ${NO_MONITOR:-} == 1 ]]; then
 fi
 if [[ ${NO_MONITOR:-} == 1 ]]; then
     mount --bind /dev/null /etc/systemd/system/monitor-network.service
+    mount --bind /dev/null /etc/systemd/system/tinfoil-models.timer
 else
     # Keep DNS inside Monitor's TUN, including while its SSH connection is down.
     printf 'nameserver 100.127.255.2\noptions timeout:1 attempts:2\n' > /etc/resolv.conf

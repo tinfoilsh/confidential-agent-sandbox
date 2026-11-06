@@ -1,0 +1,19 @@
+[Unit]
+Description=Fill Tinfoil providers with the models Tinfoil serves
+After=monitor-network.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+User=sandbox
+ExecStart=/usr/local/libexec/seed-agent-config --models /home/sandbox
+# Retry until the Monitor tunnel is up.
+Restart=on-failure
+RestartSec=30s
+# The lists come from the network: no sudo, and writes only where they go.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/etc/opencode /etc/crush /etc/qwen-code /usr/local/share/tinfoil
+ReadWritePaths=-/home/sandbox/.pi/agent -/home/sandbox/.factory -/home/sandbox/.config/goose/custom_providers -/home/sandbox/.codex
