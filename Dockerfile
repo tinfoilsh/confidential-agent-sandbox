@@ -99,6 +99,8 @@ RUN sed -i "s/<VERSION>/${SANDBOX_VERSION}/" /etc/motd \
        done \
     && /usr/local/bin/monitor run --help > /dev/null \
     && /usr/local/bin/monitor mcp serve --help > /dev/null \
+    && /usr/local/bin/monitor catalog --help > /dev/null \
+    && /usr/local/bin/monitor policy propose --help > /dev/null \
     && /usr/local/bin/monitor network --help > /dev/null \
     && /usr/local/bin/monitor enable --help > /dev/null
 

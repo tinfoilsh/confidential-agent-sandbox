@@ -9,6 +9,8 @@ import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
+import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -26,6 +28,13 @@ import tempfile
 import threading
 import time
 from urllib.parse import urlsplit
+
+
+AGENT_HOST = "agent.monitor"
+# Sandbox images ship these; the enable and network commands appear only there.
+ENABLE_TINFOIL = Path("/usr/local/libexec/enable-tinfoil")
+SING_BOX = Path("/usr/local/bin/sing-box")
+SYSTEM_CA = Path("/usr/local/share/ca-certificates/monitor.crt")
 
 
 class MonitorError(Exception):
@@ -74,9 +83,9 @@ class Client:
         command += ["-S", self.control or "none", "-o", "ControlMaster=no"]
         return command
 
-    def exchange(self, command, request, host):
+    def exchange(self, command, request):
         # communicate(input=...) closes stdin before the reply. ssh forwards that
-        # EOF, and Go's HTTP server cancels the request when it reads it.
+        # EOF, and Go's HTTP server cancels the browser request when it reads it.
         timed_out = threading.Event()
         with tempfile.TemporaryFile() as stderr, subprocess.Popen(
             command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr
@@ -110,27 +119,25 @@ class Client:
                 if response is not None:
                     response.close()
             if timed_out.is_set():
-                raise MonitorError("request timed out; an action may have run. Check Monitor activity before retrying")
+                raise MonitorError("request timed out; an action may have run. Inspect the browser before retrying")
             stderr.seek(0)
             detail = ssh_failure(stderr.read().decode(errors="replace").strip())
             if failure:
-                raise MonitorError(f"request to {host} failed: {detail or failure}") from failure
+                raise MonitorError(f"request to {AGENT_HOST} failed: {detail or failure}") from failure
             if process.returncode:
                 raise MonitorError(f"SSH connection failed: {detail or process.returncode}. Check the {self.ssh_host!r} SSH configuration")
             return response.status, content
 
-    def request(self, host, method, path, body=None):
-        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\.monitor", host):
-            raise MonitorError(f"invalid connection host: {host!r}")
+    def request(self, method, path, body=None):
         data = json.dumps(body, ensure_ascii=False).encode() if body is not None else b""
         request = (
-            f"{method} {path} HTTP/1.1\r\nHost: {host}\r\n"
+            f"{method} {path} HTTP/1.1\r\nHost: {AGENT_HOST}\r\n"
             f"Connection: close\r\nContent-Type: application/json\r\n"
             f"Content-Length: {len(data)}\r\n\r\n"
         ).encode() + data
         command = self.ssh() + ["-o", "ClearAllForwardings=yes"]
-        command += ["-W", f"{host}:80", "--", self.ssh_host]
-        status, content = self.exchange(command, request, host)
+        command += ["-W", f"{AGENT_HOST}:80", "--", self.ssh_host]
+        status, content = self.exchange(command, request)
         if status >= 300:
             detail = content.decode(errors="replace").strip()
             raise MonitorError(f"HTTP {status}: {detail}")
@@ -138,11 +145,31 @@ class Client:
 
     def connections(self):
         try:
-            return json.loads(self.request("agent.monitor", "GET", "/connections"))["connections"]
+            listing = json.loads(self.request("GET", "/connections"))
+            if not isinstance(listing["connections"], list) or not isinstance(listing["ca"], str) or not listing["ca"]:
+                raise ValueError()
+            return listing
         except (ValueError, KeyError, TypeError) as error:
             raise MonitorError("invalid connection catalog from the monitor") from error
 
-
+    def catalog(self):
+        try:
+            value = json.loads(self.request("GET", "/catalog"))
+            if (not isinstance(value, dict)
+                    or not isinstance(value.get("catalog_id"), str)
+                    or not isinstance(value.get("presets"), dict)
+                    or not isinstance(value.get("vocabulary"), dict)):
+                raise ValueError()
+            for name, entry in value["presets"].items():
+                if (not isinstance(name, str)
+                        or not isinstance(entry, dict)
+                        or not isinstance(entry.get("title"), str)):
+                    raise ValueError()
+                if "group" in entry and not isinstance(entry["group"], str):
+                    raise ValueError()
+            return value
+        except (ValueError, KeyError, TypeError, AttributeError) as error:
+            raise MonitorError("invalid preset catalog from the monitor") from error
 
 def receive(sock, size):
     data = b""
@@ -155,7 +182,6 @@ def receive(sock, size):
 
 
 def relay(left, right):
-    # Keep the opposite direction alive after EOF, including streamed responses.
     readable = [left, right]
     while readable:
         ready, _, _ = select.select(readable, [], [])
@@ -231,7 +257,7 @@ class ForwardHandler(socketserver.BaseRequestHandler):
 
     def handle(self):
         try:
-            with self.server.session.stream(self.host, 80, route=False) as upstream:
+            with self.server.session.stream(self.host, 80) as upstream:
                 relay(self.request, upstream)
         except (OSError, MonitorError):
             pass  # EOF tells the MCP client that its request did not complete.
@@ -313,9 +339,10 @@ class Session:
             raise MonitorError(f"SSH tunnel stopped: {detail or self.master.returncode}")
 
     @contextlib.contextmanager
-    def stream(self, host, port, route=True):
+    def stream(self, host, port):
         self.check()
-        if route:
+        if self.routes and not host.lower().endswith(".monitor"):
+            host = host.lower()
             matches, best = [], -1
             for connection in self.routes:
                 origins = [urlsplit(slot["origin"]) for slot in connection["slots"] or []]
@@ -344,7 +371,7 @@ class Session:
             connection.sendall(b"\x05\x01\x00\x03" + bytes([len(encoded)]) + encoded + struct.pack("!H", port))
             version, status, _, kind = receive(connection, 4)
             if version != 5 or status != 0:
-                raise MonitorError(f"Monitor refused {host}:{port}; check connection access and readiness")
+                raise MonitorError(f"Monitor refused {host}:{port}; check connection access and readiness, or select one with --connection NAME")
             size = {1: 4, 4: 16}.get(kind)
             if kind == 3:
                 size = receive(connection, 1)[0]
@@ -394,14 +421,8 @@ class Session:
             self.temporary.cleanup()
 
     def environment(self, selected, profile):
-        try:
-            setup = json.loads(self.client.request("agent.monitor", "GET", "/connections"))
-            connections = [c for c in setup["connections"] if c["placeholders"] is not None]
-            ca = setup["ca"]
-            if not isinstance(ca, str) or not ca:
-                raise ValueError()
-        except (ValueError, KeyError, TypeError) as error:
-            raise MonitorError("invalid connection catalog from the monitor") from error
+        listing = self.client.connections()
+        connections = [c for c in listing["connections"] if c["placeholders"] is not None]
         credential_names = {name for c in connections for name in c["placeholders"]}
         if selected:
             missing = set(selected) - {c["name"] for c in connections}
@@ -417,13 +438,15 @@ class Session:
         placeholders, shared = credential_environment(connections)
         for variable, names in shared.items():
             print(f"monitor: {variable} is shared; use " + ", ".join("$" + name for name in names), file=sys.stderr)
-        self.routes = connections
+        self.connections = connections
+        # Without --connection, the server chooses among every connection this identity reaches.
+        self.routes = connections if selected else []
         # Validate the CA without modifying either the system or user trust store.
         trust = ssl.create_default_context()
         public_roots = "".join(ssl.DER_cert_to_PEM_cert(c) for c in trust.get_ca_certs(binary_form=True))
-        trust.load_verify_locations(cadata=ca)
+        trust.load_verify_locations(cadata=listing["ca"])
         bundle = self.directory / "ca.pem"
-        bundle.write_text(public_roots + ca)
+        bundle.write_text(public_roots + listing["ca"])
         bundle.chmod(0o600)
         port = self.listen(("127.0.0.1", 0), ProxyHandler, http=True)
         proxy = f"http://127.0.0.1:{port}"
@@ -508,7 +531,6 @@ def credential_environment(connections):
     env, qualified_names = {}, {}
     for name, variable, value, qualified in credentials:
         if len(by_name[qualified]) > 1:
-            # Case folding and punctuation can make different names look alike.
             suffix = hashlib.sha256(json.dumps([name, variable]).encode()).hexdigest()[:12].upper()
             qualified += "_" + suffix
             while qualified in by_name or qualified in env:
@@ -518,7 +540,6 @@ def credential_environment(connections):
 
     shared = {}
     for variable, entries in by_variable.items():
-        # A credential called PATH is still usable through its qualified name.
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable) or variable in RESERVED_ENV or variable.startswith(("MONITOR_", "GIT_CONFIG_", "LD_", "DYLD_")):
             continue
         if len(entries) == 1:
@@ -597,7 +618,7 @@ def shell_command(session, env, shell):
         raise MonitorError("monitor shell supports bash and zsh; use --shell /path/to/bash")
     label = re.sub(r"[^a-zA-Z0-9_.-]", "_", env["MONITOR_CLIENT_PROFILE"])
     # User startup files are deliberately skipped so they cannot silently change
-    # account selection or routing. zsh always reads its system zshenv first.
+    # connection selection or routing. zsh always reads its system zshenv first.
     exports = "\n".join(f"export {key}={shlex.quote(value)}" for key, value in env.items()
                         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key))
     if name == "bash":
@@ -678,9 +699,9 @@ def mcp_probe(host, port, timeout):
 
 
 def mcp_servers(session, address=("127.0.0.1", 0)):
-    connections = [c for c in session.client.connections() if c["kind"] in ("mcp", "tinfoil-mcp")]
+    connections = [c for c in session.client.connections()["connections"] if c["kind"] in ("mcp", "tinfoil-mcp")]
     if not connections:
-        raise MonitorError("no reachable MCP connections; an HTTP API account alone does not provide MCP tools")
+        raise MonitorError("no reachable MCP connections; an HTTP API connection alone does not provide MCP tools")
     servers, tools = {}, 0
     for connection in connections:
         name = connection["name"]
@@ -713,7 +734,7 @@ def managed_command(client, args):
         if args.command == "mcp":
             _, count = mcp_servers(session, address)
             if not count:
-                print("monitor: no tools are visible; check account access and tool review in the web app", file=sys.stderr)
+                print("monitor: no tools are visible; check connection access and tool review in the web app", file=sys.stderr)
             while True:
                 session.check()
                 time.sleep(0.1)
@@ -721,6 +742,23 @@ def managed_command(client, args):
         if args.command == "shell":
             command = shell_command(session, env, args.shell)
         return run_child(session, command, env)
+
+
+# Owner and VM commands come from monitor_vm, which only the host client bundles.
+def vm_module():
+    if "monitor_vm" not in sys.modules:
+        path = Path(__file__).with_name("monitor_vm.py")
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location("monitor_vm", path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["monitor_vm"] = module
+            spec.loader.exec_module(module)
+        else:
+            try:
+                importlib.import_module("monitor_vm")
+            except ModuleNotFoundError:
+                return None
+    return sys.modules["monitor_vm"]
 
 
 def load_profile(args):
@@ -743,6 +781,51 @@ def load_profile(args):
     args.ssh_config = args.ssh_config or profile.get("ssh_config")
     if hasattr(args, "connection") and args.command in ("run", "shell"):
         args.connection = args.connection or connections
+
+
+def connect(args):
+    load_profile(args)
+    args.ssh_host = args.ssh_host or os.environ.get("MONITOR_SSH_HOST", "monitor")
+    args.ssh_config = args.ssh_config or os.environ.get("MONITOR_SSH_CONFIG")
+    if args.ssh_config:
+        args.ssh_config = os.path.abspath(os.path.expanduser(args.ssh_config))
+    return Client(args.ssh_host, args.ssh_config, args.timeout)
+
+
+def policy_command(client, args):
+    if args.policy_action == "show":
+        result = json.loads(client.request("GET", "/policy"))
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(result["source"], end="")
+        return 0
+    if args.policy_action == "status":
+        if not re.fullmatch(r"[A-Z2-7]{26,}", args.id):
+            raise MonitorError("proposal ID must be at least 26 base32 characters")
+        result = json.loads(client.request("GET", f"/policy/proposals/{args.id}"))
+        if (not isinstance(result, dict) or result.get("id") != args.id
+                or result.get("state") not in ("pending", "approved", "denied", "outdated")):
+            raise MonitorError("invalid proposal status from the monitor")
+        print(json.dumps(result, indent=2))
+        return 0
+    if args.policy_action == "propose":
+        body = {"reason": args.reason}
+        if args.changes:
+            raw = sys.stdin.read() if args.changes == "-" else Path(args.changes).read_text()
+            try:
+                body["changes"] = json.loads(raw)
+            except json.JSONDecodeError as err:
+                raise MonitorError(f"invalid structured changes JSON: {err}") from err
+        if args.file:
+            body["source"] = sys.stdin.read() if args.file == "-" else Path(args.file).read_text()
+        for pointer in args.delete:
+            if not pointer.startswith("/") or re.search(r"~(?![01])", pointer):
+                raise MonitorError("--delete requires a JSON Pointer, for example /connections/github")
+            body.setdefault("delete", []).append([part.replace("~1", "/").replace("~0", "~") for part in pointer[1:].split("/")])
+        result = json.loads(client.request("POST", "/policy/proposals", body))
+        print(json.dumps(result, indent=2))
+        return 0
 
 
 def network_config(socks_port):
@@ -776,23 +859,18 @@ def network_command(client):
     if os.geteuid() != 0:
         raise MonitorError("system-wide routing requires root; use systemctl start monitor-network")
     with Session(client) as session:
-        setup = json.loads(client.request("agent.monitor", "GET", "/connections"))
-        ca = setup["ca"]
-        if not isinstance(ca, str) or not ca:
-            raise MonitorError("Monitor did not supply a CA")
+        ca = client.connections()["ca"]
         ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=ca)
-        certificate = Path("/usr/local/share/ca-certificates/monitor.crt")
-        if not certificate.exists() or certificate.read_text() != ca:
-            temporary = certificate.with_suffix(".tmp")
+        if not SYSTEM_CA.exists() or SYSTEM_CA.read_text() != ca:
+            temporary = SYSTEM_CA.with_suffix(".tmp")
             temporary.write_text(ca)
             temporary.chmod(0o644)
-            temporary.replace(certificate)
+            temporary.replace(SYSTEM_CA)
         subprocess.run(["update-ca-certificates", "--fresh"], check=True)
         config = session.directory / "sing-box.json"
         config.write_text(json.dumps(network_config(session.socks_port)))
         # run_child tears down the TUN on tunnel loss. Host containment stays active.
-        return run_child(session, ["/usr/local/bin/sing-box", "run", "-c", str(config)], os.environ.copy())
-
+        return run_child(session, [str(SING_BOX), "run", "-c", str(config)], os.environ.copy())
 
 
 def parser():
@@ -807,6 +885,17 @@ def parser():
     p.add_argument("--client-config", default=str(Path.home() / ".config/monitor/client.json"), help="client profiles JSON file")
     p.add_argument("--timeout", type=float, default=300, help="request timeout in seconds (default: 300)")
     commands = p.add_subparsers(dest="command", required=True)
+    policy = commands.add_parser("policy", help="inspect policy views and propose TOML edits")
+    policy_commands = policy.add_subparsers(dest="policy_action", required=True)
+    show_policy = policy_commands.add_parser("show", help="show the policy view available to this identity as TOML")
+    show_policy.add_argument("--json", action="store_true", help="show the response as JSON")
+    status_policy = policy_commands.add_parser("status", help="show the current state of one submitted proposal")
+    status_policy.add_argument("id", help="proposal ID returned by policy propose")
+    propose = policy_commands.add_parser("propose", help="submit connection changes for owner review")
+    propose.add_argument("file", nargs="?", help="TOML file, or - for stdin")
+    propose.add_argument("--changes", metavar="FILE", help="structured Change[] JSON file, or - for stdin")
+    propose.add_argument("--reason", required=True, help="explain why the connection change is needed")
+    propose.add_argument("--delete", action="append", default=[], help="connection-scoped JSON Pointer to remove; repeat for multiple deletions")
     run = commands.add_parser("run", help="run a local command through Monitor")
     run.add_argument("--connection", action="append", default=[], metavar="NAME", help="HTTP connection to use; repeat for several")
     run.add_argument("argv", nargs=argparse.REMAINDER, help="-- COMMAND [ARG ...]")
@@ -814,14 +903,22 @@ def parser():
     shell.add_argument("--connection", action="append", default=[], metavar="NAME", help="HTTP connection to use; repeat for several")
     shell.add_argument("--shell", default=os.environ.get("SHELL", "/bin/bash"), help="bash or zsh executable; startup files are skipped")
     mcp = commands.add_parser("mcp", help="connect MCP clients to Monitor")
-    serve = mcp.add_subparsers(dest="action", required=True).add_parser("serve", help="serve the MCP gateway on loopback")
-    serve.add_argument("--listen", default="127.0.0.1:8400", help="loopback IP:port; port 0 selects a free port")
+    serve = mcp.add_subparsers(dest="action", required=True).add_parser("serve", help="serve each ready MCP connection on loopback")
+    serve.add_argument("--listen", default="127.0.0.1:8400", help="loopback IP:first port; uses consecutive ports, or free ports with port 0")
     connections = commands.add_parser("connections", help="list reachable connections and their current status")
-    connections.add_argument("--json", action="store_true", help="include account, host and access settings as JSON")
-    enable = commands.add_parser("enable", help="set the substitution key in optional Tinfoil provider settings")
-    enable.add_argument("provider", choices=["tinfoil"])
-    enable.add_argument("placeholder", metavar="SUBSTITUTION_KEY", help="public tfm_tinfoil_ substitution key copied from Monitor")
-    commands.add_parser("network", help="run the system-wide SSH/TUN service (root only)")
+    connections.add_argument("--json", action="store_true", help="include host and access settings as JSON")
+    catalog = commands.add_parser("catalog", help="list connection types available for owner-reviewed setup")
+    catalog.add_argument("--json", action="store_true", help="show complete safe catalog metadata as JSON")
+    if ENABLE_TINFOIL.exists():
+        enable = commands.add_parser("enable", help="set the substitution key in optional Tinfoil provider settings")
+        enable.add_argument("provider", choices=["tinfoil"])
+        enable.add_argument("placeholder", metavar="SUBSTITUTION_KEY", help="public tfm_tinfoil_ substitution key copied from Monitor")
+    if SING_BOX.exists():
+        commands.add_parser("network", help="run the system-wide SSH/TUN service (root only)")
+    vm = vm_module()
+    if vm:
+        vm.add_commands(commands, policy_commands)
+    commands.metavar = "{" + ",".join(name for name in commands.choices if not name.startswith("_")) + "}"
     return p
 
 
@@ -832,37 +929,53 @@ def main(argv=None):
         p.error("--timeout must be a positive, finite number")
     previous = {}
     try:
+        def interrupted(signum, frame):
+            raise Interrupted(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            previous[signum] = signal.signal(signum, interrupted)
+        vm = vm_module()
+        if vm and vm.handles(args):
+            return vm.command(args, sys.modules[__name__])
         if args.command == "enable":
-            return subprocess.run(["/usr/local/libexec/enable-tinfoil", args.placeholder]).returncode
-        load_profile(args)
-        args.ssh_host = args.ssh_host or os.environ.get("MONITOR_SSH_HOST", "monitor")
-        args.ssh_config = args.ssh_config or os.environ.get("MONITOR_SSH_CONFIG")
-        if args.ssh_config:
-            args.ssh_config = os.path.abspath(os.path.expanduser(args.ssh_config))
-        client = Client(args.ssh_host, args.ssh_config, args.timeout)
+            return subprocess.run([ENABLE_TINFOIL, args.placeholder]).returncode
+        client = connect(args)
+        if args.command == "policy":
+            return policy_command(client, args)
         if args.command in ("run", "shell", "mcp", "network"):
             if sys.version_info < (3, 11):
-                raise MonitorError("this command requires Python 3.11 or newer")
-            def interrupted(signum, frame):
-                raise Interrupted(signum)
-            for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-                previous[signum] = signal.signal(signum, interrupted)
-            if args.command == "network":
-                return network_command(client)
-            return managed_command(client, args)
-        connections = client.connections()
-        if args.json:
-            print(json.dumps({"connections": connections}, indent=2))
-        elif connections:
-            rows = [("KIND", "NAME", "STATE", "HOST")] + [
-                (c["kind"], c["name"], c["state"], c["host"]) for c in connections
-            ]
-            widths = [max(len(row[i]) for row in rows) for i in range(4)]
-            for row in rows:
-                print("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip())
-        else:
-            print("No connections are available to this agent. Ask the owner to grant access.")
-        return 0
+                raise MonitorError("run, shell, mcp serve and network require Python 3.11 or newer")
+            return network_command(client) if args.command == "network" else managed_command(client, args)
+        if args.command == "connections":
+            connections = client.connections()["connections"]
+            if args.json:
+                print(json.dumps({"connections": connections}, indent=2))
+            elif connections:
+                rows = [("KIND", "NAME", "STATE", "HOST")] + [
+                    (c["kind"], c["name"], c["state"], c["host"]) for c in connections
+                ]
+                widths = [max(len(row[i]) for row in rows) for i in range(4)]
+                for row in rows:
+                    print("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip())
+            else:
+                print("No connections are available to this agent. Ask the owner to grant access.")
+            return 0
+        if args.command == "catalog":
+            catalog = client.catalog()
+            if args.json:
+                print(json.dumps(catalog, indent=2))
+            else:
+                presets = catalog["presets"]
+                group_order = {"api": 0, "mcp": 1, "protocol": 2, "generic": 99}
+                rows = [("GROUP", "NAME", "TITLE")] + [
+                    (entry.get("group", "api"), name, entry.get("title", name))
+                    for name, entry in sorted(presets.items(), key=lambda item: (
+                        group_order.get(item[1].get("group", "api"), 50),
+                        item[1].get("title", item[0])))
+                ]
+                widths = [max(len(str(row[i])) for row in rows) for i in range(3)]
+                for row in rows:
+                    print("  ".join(str(value).ljust(width) for value, width in zip(row, widths)).rstrip())
+            return 0
     except (MonitorError, OSError, http.client.HTTPException, subprocess.SubprocessError, ValueError, KeyError, EOFError) as error:
         print(f"monitor: {error}", file=sys.stderr)
         return 1
