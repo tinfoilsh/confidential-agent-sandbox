@@ -8,12 +8,7 @@
         "baseURL": "https://tinfoil.monitor/v1",
         "apiKey": "monitor"
       },
-      "models": {
-        "kimi-k3": {
-          "name": "Kimi K3",
-          "limit": {"context": 256000, "output": 65536}
-        }
-      }
+      "models": {}
     }
   }
 }

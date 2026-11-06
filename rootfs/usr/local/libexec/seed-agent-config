@@ -1,16 +1,33 @@
 #!/usr/bin/python3 -I
-"""Add Tinfoil providers and Monitor web search; keep user selections."""
+"""Add Tinfoil providers and Monitor web search; keep user selections.
+
+With --models, fill every Tinfoil provider with the models Tinfoil serves now.
+"""
 
 import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
 import tempfile
 import tomllib
+import urllib.request
 from pathlib import Path
 
 TEMPLATES = Path("/usr/local/share/tinfoil")
 WEBSEARCH_URL = "https://tinfoil-websearch.monitor/mcp"
+TINFOIL_URL = "https://tinfoil.monitor/v1"
+TINFOIL_CONNECTION = "tinfoil"
+# Monitor replaces this public placeholder with the connection's real key.
+PLACEHOLDER = "monitor"
+# Qwen reads the placeholder from this variable in system-defaults.json.
+QWEN_KEY_VARIABLE = "MONITOR_TINFOIL_API_KEY"
+# /v1/models publishes no output limit; each model reserves this much of its window.
+OUTPUT_TOKENS = 65536
+# The Codex profile uses the Responses API, which not every model serves.
+RESPONSES_ENDPOINT = "/v1/responses"
+REQUEST_TIMEOUT = 60
 
 # Exact bytes written by seed-agent-config in sandbox v0.1.17 (3f04860).
 # Only remove untouched generated defaults; edited files belong to the user.
@@ -41,29 +58,17 @@ def update_json(path, update):
         update(data)
         if before == json.dumps(data):
             return
-    except (OSError, ValueError, AttributeError, TypeError) as error:
+    except (OSError, ValueError, AttributeError, TypeError, KeyError) as error:
         print(f"seed-agent-config: preserving {path}: {error}", file=sys.stderr)
         return
     write_settings(path, json.dumps(data, indent=2) + "\n")
 
 
-def add_provider(path, template, key):
-    """Pi and Droid only load providers from their user's shared settings file."""
+def add_provider(path, template):
+    """Pi only loads providers from its user's shared settings file."""
     def update(data):
-        provider = json.loads(template.read_text())[key]
-        if key == "providers":
-            data.setdefault(key, {}).setdefault("tinfoil", provider["tinfoil"])
-        else:
-            models = data.setdefault(key, [])
-            if not isinstance(models, list):
-                raise ValueError("customModels is not an array")
-            model = provider[0]
-            if not any(
-                m.get("model") == model["model"]
-                and m.get("baseUrl") == model["baseUrl"]
-                for m in models
-            ):
-                models.append(model)
+        provider = json.loads(template.read_text())["providers"]["tinfoil"]
+        data.setdefault("providers", {}).setdefault("tinfoil", provider)
     update_json(path, update)
 
 
@@ -75,6 +80,9 @@ def write_settings(path, content):
         try:
             output.write(content)
             output.close()
+            if path.exists():
+                # Root rewrites world-readable system settings in place.
+                temporary.chmod(path.stat().st_mode)
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -121,12 +129,7 @@ def seed(directory, templates=TEMPLATES):
         directory / ".config/goose/custom_providers/tinfoil.json",
         (templates / "goose.json").read_text(),
     )
-    add_provider(
-        directory / ".pi/agent/models.json", templates / "pi.json", "providers"
-    )
-    add_provider(
-        directory / ".factory/settings.json", templates / "droid.json", "customModels"
-    )
+    add_provider(directory / ".pi/agent/models.json", templates / "pi.json")
     if os.environ.get("NO_MONITOR") != "1":
         # Virtual .monitor hosts have no direct-network fallback. The SSH tunnel
         # authenticates the sandbox; Monitor holds the key and attests the MCP server.
@@ -147,5 +150,145 @@ def seed(directory, templates=TEMPLATES):
         )
 
 
+def available(payload):
+    """Tool-calling chat models with room for a response, the smartest stable one first."""
+    models = [
+        m for m in payload["data"]
+        if m.get("type") == "chat" and m.get("tool_calling") and not m.get("deprecated")
+        and isinstance(m.get("context_window"), int) and m["context_window"] > OUTPUT_TOKENS
+    ]
+    return sorted(models, key=lambda m: (
+        bool(m.get("experimental")), -max((m.get("intelligence") or {}).values(), default=0)))
+
+
+def title(model):
+    return model.get("name") or model["id"]
+
+
+def write_system(models, root):
+    """Root-owned provider lists, and the opt-in launch settings that name one model."""
+    default = models[0]
+
+    def opencode(data):
+        data["provider"]["tinfoil"]["models"] = {
+            m["id"]: {"name": title(m), "limit": {"context": m["context_window"], "output": OUTPUT_TOKENS}}
+            for m in models
+        }
+
+    def crush(data):
+        data["providers"]["tinfoil"]["models"] = [
+            {"id": m["id"], "name": title(m), "context_window": m["context_window"], "default_max_tokens": OUTPUT_TOKENS}
+            for m in models
+        ]
+
+    def qwen(data):
+        providers = data["modelProviders"]["openai"]
+        providers[:] = [p for p in providers if p.get("baseUrl") != TINFOIL_URL] + [
+            {"id": m["id"], "name": f"Tinfoil / {title(m)}", "baseUrl": TINFOIL_URL,
+             "envKey": QWEN_KEY_VARIABLE, "generationConfig": {"contextWindowSize": m["context_window"]}}
+            for m in models
+        ]
+
+    def claude(data):
+        for tier in ("", "_DEFAULT_OPUS", "_DEFAULT_SONNET", "_DEFAULT_HAIKU"):
+            data["env"][f"ANTHROPIC{tier}_MODEL"] = default["id"]
+
+    for relative, update in (("etc/opencode/opencode.json", opencode), ("etc/crush/crush.json", crush),
+                             ("etc/qwen-code/system-defaults.json", qwen),
+                             ("usr/local/share/tinfoil/claude.json", claude)):
+        update_json(root / relative, update)
+
+    # copilot.env reads these lines as data; served text never becomes shell code.
+    path = root / "usr/local/share/tinfoil/copilot.model"
+    lines = (default["id"], default["context_window"] - OUTPUT_TOKENS, OUTPUT_TOKENS)
+    updated = "".join(f"{line}\n" for line in lines)
+    if not path.exists() or path.read_text() != updated:
+        write_settings(path, updated)
+
+
+def write_codex(path, models):
+    """Keep the profile's model while Tinfoil still serves it; otherwise use the default."""
+    windows = {m["id"]: m["context_window"] for m in models if RESPONSES_ENDPOINT in m.get("endpoints", ())}
+    try:
+        if not windows or not path.is_file() or path.is_symlink():
+            return
+        content = path.read_text()
+        model = tomllib.loads(content).get("model")
+        model = model if model in windows else next(iter(windows))
+        values = {"model": json.dumps(model), "model_context_window": windows[model],
+                  "model_auto_compact_token_limit": windows[model] - OUTPUT_TOKENS}
+        table = re.search(r"^\[", content, re.M)
+        head, tables = (content[:table.start()], content[table.start():]) if table else (content, "")
+        kept = [line for line in head.splitlines() if line.split("=")[0].strip() not in values]
+        updated = "".join(f"{key} = {value}\n" for key, value in values.items()) + "".join(
+            line + "\n" for line in kept) + tables
+        tomllib.loads(updated)
+    except (OSError, ValueError, TypeError) as error:
+        print(f"seed-agent-config: preserving {path}: {error}", file=sys.stderr)
+        return
+    if updated != content:
+        write_settings(path, updated)
+
+
+def write_home(directory, models):
+    def pi(data):
+        provider = data.get("providers", {}).get("tinfoil")
+        if provider is not None:
+            provider["models"] = [
+                {"id": m["id"], "name": f"{title(m)} (Tinfoil through Monitor)",
+                 "contextWindow": m["context_window"], "maxTokens": OUTPUT_TOKENS}
+                for m in models
+            ]
+
+    def droid(data):
+        custom = data.setdefault("customModels", [])
+        key = next((c.get("apiKey") for c in custom if c.get("baseUrl") == TINFOIL_URL), PLACEHOLDER)
+        custom[:] = [c for c in custom if c.get("baseUrl") != TINFOIL_URL] + [
+            {"model": m["id"], "displayName": f"{title(m)} (Tinfoil through Monitor)", "baseUrl": TINFOIL_URL,
+             "apiKey": key, "provider": "generic-chat-completion-api", "maxOutputTokens": OUTPUT_TOKENS}
+            for m in models
+        ]
+
+    def goose(data):
+        data["models"] = [{"name": m["id"], "context_limit": m["context_window"]} for m in models]
+
+    update_json(directory / ".pi/agent/models.json", pi)
+    update_json(directory / ".factory/settings.json", droid)
+    goose_path = directory / ".config/goose/custom_providers/tinfoil.json"
+    if goose_path.exists():
+        update_json(goose_path, goose)
+    write_codex(directory / ".codex/tinfoil.config.toml", models)
+
+
+def refresh(directory, payload, root=Path("/")):
+    models = available(payload)
+    if not models:
+        print("seed-agent-config: Tinfoil serves no tool-calling chat models", file=sys.stderr)
+        return
+    write_system(models, root)
+    write_home(directory, models)
+
+
+def tinfoil_ready():
+    listing = subprocess.run(["/usr/local/bin/monitor", "connections", "--json"], capture_output=True,
+                             check=True, timeout=REQUEST_TIMEOUT)
+    return any(c["name"] == TINFOIL_CONNECTION and c["state"] == "ready"
+               for c in json.loads(listing.stdout)["connections"])
+
+
+def fetch_models():
+    request = urllib.request.Request(TINFOIL_URL + "/models", headers={"Authorization": "Bearer " + PLACEHOLDER})
+    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+        return json.load(response)
+
+
 if __name__ == "__main__":
-    seed(Path(sys.argv[1]))
+    if sys.argv[1] != "--models":
+        seed(Path(sys.argv[1]))
+    else:
+        try:
+            # Without a granted Tinfoil connection, skip the request so Activity stays quiet.
+            if tinfoil_ready():
+                refresh(Path(sys.argv[2]), fetch_models())
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError) as error:
+            sys.exit(f"seed-agent-config: cannot refresh Tinfoil models: {error}")

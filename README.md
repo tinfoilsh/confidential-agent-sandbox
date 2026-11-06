@@ -34,9 +34,8 @@ or `monitor agent` command.
 
 Add a **Tinfoil** account in Monitor, leave its connection named **`tinfoil`**,
 save the real API key there, and grant the sandbox access. Grant **Inference →
-Generate responses**, **Count input tokens** for Claude, and **List models** for
-clients that discover models. Check the connection name and readiness with
-`monitor connections`.
+Generate responses**, **Count input tokens** for Claude, and **List models**.
+Check the connection name and readiness with `monitor connections`.
 
 The following inventory was checked against `nix-closure` commit `aa839b2`,
 with nixpkgs `42f17a57f4f6e33b3de3dca0a2a5ea5233169d02`. The sandbox template pins
@@ -46,14 +45,14 @@ lacked seven of these agents. Hermes is no longer in the toolchain source.
 
 | Agent | Audited version | Choose Tinfoil |
 | --- | --- | --- |
-| OpenCode (`opencode`) | 1.18.29 | `/models` → Tinfoil / Kimi K3, or `opencode --model tinfoil/kimi-k3` |
+| OpenCode (`opencode`) | 1.18.29 | `/models` → Tinfoil, or `opencode --model tinfoil/MODEL` |
 | Claude Code (`claude`) | 2.1.260 | `claude --settings /usr/local/share/tinfoil/claude.json` |
 | Codex (`codex`) | 0.153.4 | `codex --profile tinfoil` |
 | Crush (`crush`) | 0.91.2 | Tinfoil in the model picker; `crush models` lists it |
-| Qwen Code (`qwen`) | 0.16.0 | `/model` → Tinfoil / Kimi K3 under OpenAI-compatible models; or `qwen --auth-type openai --model kimi-k3` |
-| pi (`pi`) | 0.85.1 | `/model` → Tinfoil, or `pi --provider tinfoil --model kimi-k3` |
-| Goose (`goose`) | 1.47.0 | Select Tinfoil in `goose configure`, or `goose session --provider tinfoil --model kimi-k3` |
-| Droid (`droid`) | 0.213.0 | `/model` → Custom models → Kimi K3 (Tinfoil through Monitor); requires the packaging fix below |
+| Qwen Code (`qwen`) | 0.16.0 | `/model` → a Tinfoil model under OpenAI-compatible models; or `qwen --auth-type openai --model MODEL` |
+| pi (`pi`) | 0.85.1 | `/model` → Tinfoil, or `pi --provider tinfoil --model MODEL` |
+| Goose (`goose`) | 1.47.0 | Select Tinfoil in `goose configure`, or `goose session --provider tinfoil --model MODEL` |
+| Droid (`droid`) | 0.213.0 | `/model` → Custom models → a model marked (Tinfoil through Monitor); requires the packaging fix below |
 | GitHub Copilot (`copilot`) | 1.0.61 | `(. /usr/local/share/tinfoil/copilot.env; copilot)` |
 | Amp (`amp`) | 0.0.1788367255-g70055c | No supported local provider setting for this Monitor path |
 | Cursor CLI (`cursor-agent`) | 2026.08.31-4057e58 | No supported OpenAI-compatible provider setting in this version |
@@ -78,13 +77,24 @@ system provider entry is managed configuration; users can hide it with
 system file.
 
 After home is mounted, `seed-agent-config` adds pi's provider to
-`~/.pi/agent/models.json`, Droid's custom model to `~/.factory/settings.json`,
-Goose's provider to `~/.config/goose/custom_providers/tinfoil.json`, and the
-Codex profile. It runs for `sandbox` and `root`. Existing entries and model
-selections are preserved. These files contain public Monitor placeholders,
+`~/.pi/agent/models.json`, Goose's provider to
+`~/.config/goose/custom_providers/tinfoil.json`, and the Codex profile. It runs
+for `sandbox` and `root`. Existing entries and model selections are preserved. These files contain public Monitor placeholders,
 never the real key. Goose supplies its placeholder as a fixed Authorization
 header, so it does not prompt for a key. Programs still apply their normal
 first-run/last-used model selection behavior.
+
+No model is built into the image. Once Monitor connects, and hourly after that,
+`tinfoil-models.timer` runs `seed-agent-config --models` as `sandbox`, without
+sudo and with write access only to the files it fills. While the `tinfoil`
+connection is ready, it reads Tinfoil's
+`/v1/models` through Monitor and lists every non-deprecated chat model with
+tool calling in each client, adding Droid's custom models. Claude Code, Codex
+and Copilot use the stable model with the highest published intelligence;
+Codex keeps its profile's model while Tinfoil still serves it over the
+Responses API. Served names are only ever written as JSON or TOML strings, and
+`copilot.env` reads its model from `copilot.model` as data. Restart running
+harnesses to load a new list.
 
 On upgrades from `v0.1.17`, only byte-for-byte matches of that release's four
 seeded default files are removed. Modified files, including login state,

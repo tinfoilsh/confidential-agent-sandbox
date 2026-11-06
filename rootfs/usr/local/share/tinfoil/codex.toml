@@ -1,7 +1,4 @@
-model = "kimi-k3"
 model_provider = "tinfoil"
-model_context_window = 256000
-model_auto_compact_token_limit = 200000
 
 [model_providers.tinfoil]
 name = "Tinfoil through Monitor"
