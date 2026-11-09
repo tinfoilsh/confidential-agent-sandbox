@@ -1,0 +1,13 @@
+[Unit]
+Description=Bunker routes through Monitor
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/bin/ssh -NT -F /etc/ssh/ssh_config.d/monitor.conf monitor-route
+Restart=always
+RestartSec=2s
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=multi-user.target

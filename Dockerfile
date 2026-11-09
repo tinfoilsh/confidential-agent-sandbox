@@ -107,7 +107,7 @@ RUN sed -i "s/<VERSION>/${SANDBOX_VERSION}/" /etc/motd \
     && /usr/local/bin/monitor enable --help > /dev/null
 
 RUN systemctl disable ssh.socket \
-    && systemctl enable ssh.service docker.service cron.service monitor-network.service monitor-reverse.service workspace-attestation.service tinfoil-models.timer \
+    && systemctl enable ssh.service docker.service cron.service monitor-network.service monitor-reverse.service monitor-route.service workspace-attestation.service tinfoil-models.timer \
     # The units resolve once the entrypoint links the pack's profile, so systemctl cannot enable them here.
     && ln -s /nix/var/nix/profiles/default/lib/systemd/system/nix-daemon.service \
          /nix/var/nix/profiles/default/lib/systemd/system/nix-daemon.socket /etc/systemd/system/ \
