@@ -94,6 +94,7 @@ if "$local_mode" || [[ ${NO_MONITOR:-} == 1 ]]; then
     # The image installs units in /etc, which takes precedence over /run masks.
     # A bind mount masks this boot without changing the persistent overlay.
     mount --bind /dev/null /etc/systemd/system/monitor-reverse.service
+    mount --bind /dev/null /etc/systemd/system/monitor-route.service
 fi
 if [[ ${NO_MONITOR:-} == 1 ]]; then
     mount --bind /dev/null /etc/systemd/system/monitor-network.service
