@@ -4,7 +4,9 @@ After=network.target
 StartLimitIntervalSec=0
 
 [Service]
-ExecStart=/usr/bin/ssh -NT -F /etc/ssh/ssh_config.d/monitor.conf monitor-route
+# Monitor asks this SOCKS forward for 127.0.0.2, which only listeners bound to 0.0.0.0 accept.
+ExecStart=/usr/bin/ssh -NT -F /etc/ssh/ssh_config.d/monitor.conf -l sandbox-v2:${SANDBOX_INSTANCE_ID} -R 127.0.0.1:1080 -o PermitRemoteOpen=127.0.0.2:* -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 monitor
+PassEnvironment=SANDBOX_INSTANCE_ID
 Restart=always
 RestartSec=2s
 TimeoutStopSec=10s
