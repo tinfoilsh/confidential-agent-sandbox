@@ -32,7 +32,6 @@ from urllib.parse import urlsplit
 
 AGENT_HOST = "agent.monitor"
 # Sandbox images ship these; the enable and network commands appear only there.
-ENABLE_TINFOIL = Path("/usr/local/libexec/enable-tinfoil")
 SING_BOX = Path("/usr/local/bin/sing-box")
 SYSTEM_CA = Path("/usr/local/share/ca-certificates/monitor.crt")
 
@@ -909,10 +908,6 @@ def parser():
     connections.add_argument("--json", action="store_true", help="include host and access settings as JSON")
     catalog = commands.add_parser("catalog", help="list connection types available for owner-reviewed setup")
     catalog.add_argument("--json", action="store_true", help="show complete safe catalog metadata as JSON")
-    if ENABLE_TINFOIL.exists():
-        enable = commands.add_parser("enable", help="set the substitution key in optional Tinfoil provider settings")
-        enable.add_argument("provider", choices=["tinfoil"])
-        enable.add_argument("placeholder", metavar="SUBSTITUTION_KEY", help="public tfm_tinfoil_ substitution key copied from Monitor")
     if SING_BOX.exists():
         commands.add_parser("network", help="run the system-wide SSH/TUN service (root only)")
     vm = vm_module()
@@ -936,8 +931,6 @@ def main(argv=None):
         vm = vm_module()
         if vm and vm.handles(args):
             return vm.command(args, sys.modules[__name__])
-        if args.command == "enable":
-            return subprocess.run([ENABLE_TINFOIL, args.placeholder]).returncode
         client = connect(args)
         if args.command == "policy":
             return policy_command(client, args)
