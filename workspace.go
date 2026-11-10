@@ -23,7 +23,7 @@ import (
 const (
 	agentIdentityFile = "identity"
 	monitorPinFile    = "known_hosts"
-	monitorPinHost    = "monitor "
+	monitorPinHost    = "perimeter "
 	// Formatting a new workspace can take minutes.
 	unlockTimeout = 10 * time.Minute
 )
@@ -33,13 +33,13 @@ var (
 	errIdentityConflict = ownerError{"identity_conflict", http.StatusConflict}
 )
 
-// workspace owns this boot's Monitor credentials in /run/monitor and its volume unlock.
+// workspace owns this boot's Monitor credentials in /run/perimeter and its volume unlock.
 type workspace struct {
 	instance string
 	monitor  string // directory of the Monitor identity and Monitor pin
 	uid, gid int    // the sandbox user, who reads both
 	unlock   string // workspace-unlock
-	// network restarts monitor-network once systemd runs it.
+	// network restarts perimeter-network once systemd runs it.
 	network func(context.Context) error
 
 	mu sync.Mutex

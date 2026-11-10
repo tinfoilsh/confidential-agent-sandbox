@@ -1,9 +1,9 @@
 model_provider = "tinfoil"
 
 [model_providers.tinfoil]
-name = "Tinfoil through Monitor"
-base_url = "https://tinfoil.monitor/v1"
-experimental_bearer_token = "monitor"
+name = "Tinfoil through Perimeter"
+base_url = "https://tinfoil.perimeter/v1"
+experimental_bearer_token = "perimeter"
 wire_api = "responses"
 requires_openai_auth = false
 supports_websockets = false

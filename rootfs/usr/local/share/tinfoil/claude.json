@@ -1,8 +1,8 @@
 {
   "apiKeyHelper": "",
   "env": {
-    "ANTHROPIC_BASE_URL": "https://tinfoil.monitor",
-    "ANTHROPIC_AUTH_TOKEN": "monitor",
+    "ANTHROPIC_BASE_URL": "https://tinfoil.perimeter",
+    "ANTHROPIC_AUTH_TOKEN": "perimeter",
     "ANTHROPIC_API_KEY": "",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "DISABLE_AUTOUPDATER": "1",

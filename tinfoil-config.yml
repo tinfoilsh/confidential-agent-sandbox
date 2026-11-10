@@ -1,5 +1,5 @@
 # An Ubuntu workspace with measured CVM-wide administrator access. Connect with
-# native SSH through Monitor after attested disk unlock.
+# native SSH through Perimeter after attested disk unlock.
 # Requires a CVM release with 10.254.0.0/24 alias support and host capability 5.
 cvm-version: 0.15.3-rc.1@sha256:ddd2e76a629df1bd4ec507441a387ac5db010ebc1bda3e372756e095df8692eb
 # cpus: 32
@@ -10,13 +10,13 @@ memory: 8192
 
 networks:
   dev:
-    # The host permits only the assigned Monitor after measured boot.
+    # The host permits only the assigned Perimeter after measured boot.
     egress: open
 
 attested-keys:
   - id: host-ssh
     key: ecdsa-p256
-  # Owner sessions are Noise handshakes to this per-boot key, relayed through Monitor.
+  # Owner sessions are Noise handshakes to this per-boot key, relayed through Perimeter.
   - id: owner-session
     key: x25519
 
@@ -53,7 +53,7 @@ containers:
     models: [nix]
     persistent_volumes: [workspace:/mnt/disk, workspace:/nix]
 
-    # Native SSH is also published through the Monitor reverse connection.
+    # Native SSH is also published through the Perimeter reverse connection.
     # sshd accepts only the measured owner public key.
     ports:
       - '22:22'
@@ -75,7 +75,7 @@ containers:
       start_period: 120s
 
 shim:
-  # Owner access uses attested SSH through Monitor, so no public CA is needed.
+  # Owner access uses attested SSH through Perimeter, so no public CA is needed.
   tls-mode: self-signed
   upstream-port: 8080
   authenticated: false

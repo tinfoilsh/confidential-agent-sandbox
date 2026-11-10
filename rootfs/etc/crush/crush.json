@@ -1,10 +1,10 @@
 {
   "providers": {
     "tinfoil": {
-      "name": "Tinfoil through Monitor",
+      "name": "Tinfoil through Perimeter",
       "type": "openai-compat",
-      "base_url": "https://tinfoil.monitor/v1",
-      "api_key": "monitor",
+      "base_url": "https://tinfoil.perimeter/v1",
+      "api_key": "perimeter",
       "models": []
     }
   }

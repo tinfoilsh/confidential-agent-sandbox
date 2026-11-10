@@ -1,17 +1,17 @@
 ---
-name: monitor
-description: Discover and use connections granted to this sandbox, inspect its own Monitor policy, and propose connection or access changes for owner review without handling credentials.
+name: perimeter
+description: Discover and use connections granted to this sandbox, inspect its own Perimeter policy, and propose connection or access changes for owner review without handling credentials.
 ---
 
-# Monitor in a sandbox
+# Perimeter in a sandbox
 
-Monitor is this sandbox's policy and credential boundary for external services.
-Use the installed `monitor` CLI unless directly integrating with the internal
+The Perimeter is this sandbox's policy and credential boundary for external services.
+Use the installed `perimeter` CLI unless directly integrating with the internal
 agent API.
 
 ## Rules
 
-- Never ask for or use the Monitor owner key.
+- Never ask for or use the Perimeter owner key.
 - Never ask for provider credentials. The owner configures them separately.
 - Inspect the catalog warning before proposing a Generic connection.
 - Prefer a named service connection over Generic Web, SSH, network, API, or MCP.
@@ -27,7 +27,7 @@ agent API.
 See the safe connection catalog:
 
 ```sh
-monitor catalog --json
+perimeter catalog --json
 ```
 
 Catalog entries describe setup fields, defaults, connection templates, and
@@ -37,7 +37,7 @@ actions. The final `generic` group contains broad fallback types.
 See connections this sandbox can currently use:
 
 ```sh
-monitor connections --json
+perimeter connections --json
 ```
 
 Discovery includes connection names, protocols, readiness, effective access,
@@ -48,8 +48,8 @@ values or verified credential account identifiers.
 See this sandbox's own policy projection:
 
 ```sh
-monitor policy show
-monitor policy show --json
+perimeter policy show
+perimeter policy show --json
 ```
 
 The sandbox view contains this identity's access and saved rules plus semantics
@@ -61,7 +61,7 @@ or credentials.
 Prefer structured changes for automation:
 
 ```sh
-monitor policy propose --changes changes.json \
+perimeter policy propose --changes changes.json \
   --reason "Grant this sandbox GitHub access for issue triage"
 ```
 
@@ -76,55 +76,55 @@ Example `changes.json`:
 ]
 ```
 
-Use the exact sandbox identity shown by `monitor policy show`. A deletion uses
+Use the exact sandbox identity shown by `perimeter policy show`. A deletion uses
 `"delete": true` and omits `value`. TOML fragments are also accepted:
 
 ```sh
-monitor policy propose change.toml \
+perimeter policy propose change.toml \
   --reason "Grant this sandbox GitHub access for issue triage"
 ```
 
 Proposals may contain shared connection setup or access for this sandbox only.
 They cannot change default access, credentials, MCP tool pins, identity keys or
 routes, global policies, data, global effect defaults, or other owner
-configuration. Monitor validates the candidate and removes semantic no-ops before
+configuration. The Perimeter validates the candidate and removes semantic no-ops before
 publishing it.
 
 A batch is split into one proposal per connection. The owner reviews each
 connection independently. Poll the ID from a submitted receipt with:
 
 ```sh
-monitor policy status PROPOSAL_ID
+perimeter policy status PROPOSAL_ID
 ```
 
 Status is limited to this sandbox's own proposals and reports `pending`,
 `approved`, `denied`, or `outdated`. It is process-local like the
-pending proposal itself. If a relevant setting changes first, Monitor records the
+pending proposal itself. If a relevant setting changes first, the Perimeter records the
 proposal as Outdated; submit a new proposal if it is still needed.
 
 ## Use connections
 
-HTTP and HTTPS traffic already goes through Monitor system-wide, and its CA is
+HTTP and HTTPS traffic already goes through the Perimeter system-wide, and its CA is
 in the system trust store. Direct internet egress is closed; the owner must keep
-the Monitor reverse forward connected. Transparent routing also covers tools
+the Perimeter reverse forward connected. Transparent routing also covers tools
 that ignore proxy settings.
 
 Use the wrapper when you need credential placeholders or a specific connection:
 
 ```sh
-monitor run --connection CONNECTION -- curl -fsS https://example.com
-monitor run -- your-command
-monitor shell
+perimeter run --connection CONNECTION -- curl -fsS https://example.com
+perimeter run -- your-command
+perimeter shell
 ```
 
 The wrapper configures proxy and certificate settings and exposes safe credential
-placeholders. Monitor substitutes real credentials upstream. Never replace a
+placeholders. The Perimeter substitutes real credentials upstream. Never replace a
 placeholder with a real credential.
 
 For MCP connections:
 
 ```sh
-monitor mcp serve --listen 127.0.0.1:8400
+perimeter mcp serve --listen 127.0.0.1:8400
 ```
 
 Keep it running and configure the MCP client with the reported local URL. Only
@@ -136,7 +136,7 @@ timeout, inspect the destination or Activity before retrying.
 ## Direct internal API
 
 Inside the managed sandbox, the identity-authenticated API is available at
-`agent.monitor`:
+`agent.perimeter`:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -147,10 +147,10 @@ Inside the managed sandbox, the identity-authenticated API is available at
 | `POST` | `/policy/proposals` | Submit owner-reviewed connection changes |
 
 ```sh
-curl -fsS http://agent.monitor/catalog
-curl -fsS http://agent.monitor/connections
-curl -fsS http://agent.monitor/policy
-curl -fsS -X POST http://agent.monitor/policy/proposals \
+curl -fsS http://agent.perimeter/catalog
+curl -fsS http://agent.perimeter/connections
+curl -fsS http://agent.perimeter/policy
+curl -fsS -X POST http://agent.perimeter/policy/proposals \
   -H 'Content-Type: application/json' \
   --data-binary @proposal.json
 ```

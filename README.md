@@ -1,8 +1,8 @@
 # Confidential Agent Sandbox
 
-An Ubuntu VM with Docker, encrypted storage, and network access through Monitor.
+An Ubuntu VM with Docker, encrypted storage, and network access through Perimeter.
 
-Create a Monitor and sandbox in the dashboard, then connect:
+Create a Perimeter and sandbox in the dashboard, then connect:
 
 ```sh
 tinfoil attest-ssh work --install
@@ -11,12 +11,12 @@ ssh work
 
 Rerun `attest-ssh` after either VM reboots. Back up the CLI's encryption credentials.
 
-For direct networking, select **Run without Monitor (NO_MONITOR=1)** when creating
-the sandbox in the dashboard. This sets the measured `NO_MONITOR` environment
+For direct networking, create the sandbox without a Perimeter. This sets
+the measured `NO_MONITOR` environment
 variable to `1` and omits the host network policy. The sandbox keeps its normal
-DNS and disables both Monitor tunnels. The same commands verify attestation and
+DNS and disables both Perimeter tunnels. The same commands verify attestation and
 unlock the workspace through the published SSH port; the CLI warns that traffic
-is not tunneled through Monitor. Any other value keeps Monitor enabled.
+is not tunneled through Perimeter. Any other value keeps Perimeter enabled.
 Use a release containing this option and the matching CLI; older templates do
 not declare `NO_MONITOR` and cannot accept it.
 
@@ -30,12 +30,12 @@ Atuin, zoxide, and Carapace hooks are not enabled automatically.
 
 Coding agents start with their normal provider selection and authentication.
 Tinfoil is an optional provider or launch setting; there are no agent wrappers
-or `monitor agent` command.
+or `perimeter agent` command.
 
-Add a **Tinfoil** account in Monitor, leave its connection named **`tinfoil`**,
+Add a **Tinfoil** account in Perimeter, leave its connection named **`tinfoil`**,
 save the real API key there, and grant the sandbox access. Grant **Inference →
 Generate responses**, **Count input tokens** for Claude, and **List models**.
-Check the connection name and readiness with `monitor connections`.
+Check the connection name and readiness with `perimeter connections`.
 
 The following inventory was checked against `nix-closure` commit `aa839b2`,
 with nixpkgs `42f17a57f4f6e33b3de3dca0a2a5ea5233169d02`. The sandbox template pins
@@ -52,9 +52,9 @@ lacked seven of these agents. Hermes is no longer in the toolchain source.
 | Qwen Code (`qwen`) | 0.16.0 | `/model` → a Tinfoil model under OpenAI-compatible models; or `qwen --auth-type openai --model MODEL` |
 | pi (`pi`) | 0.85.1 | `/model` → Tinfoil, or `pi --provider tinfoil --model MODEL` |
 | Goose (`goose`) | 1.47.0 | Select Tinfoil in `goose configure`, or `goose session --provider tinfoil --model MODEL` |
-| Droid (`droid`) | 0.213.0 | `/model` → Custom models → a model marked (Tinfoil through Monitor); requires the packaging fix below |
+| Droid (`droid`) | 0.213.0 | `/model` → Custom models → a model marked (Tinfoil through Perimeter); requires the packaging fix below |
 | GitHub Copilot (`copilot`) | 1.0.61 | `(. /usr/local/share/tinfoil/copilot.env; copilot)` |
-| Amp (`amp`) | 0.0.1788367255-g70055c | No supported local provider setting for this Monitor path |
+| Amp (`amp`) | 0.0.1788367255-g70055c | No supported local provider setting for this Perimeter path |
 | Cursor CLI (`cursor-agent`) | 2026.08.31-4057e58 | No supported OpenAI-compatible provider setting in this version |
 | Antigravity (`agy`) | 1.1.24 | No supported OpenAI-compatible provider setting in this version |
 
@@ -79,16 +79,16 @@ system file.
 After home is mounted, `seed-agent-config` adds pi's provider to
 `~/.pi/agent/models.json`, Goose's provider to
 `~/.config/goose/custom_providers/tinfoil.json`, and the Codex profile. It runs
-for `sandbox` and `root`. Existing entries and model selections are preserved. These files contain public Monitor placeholders,
+for `sandbox` and `root`. Existing entries and model selections are preserved. These files contain public Perimeter placeholders,
 never the real key. Goose supplies its placeholder as a fixed Authorization
 header, so it does not prompt for a key. Programs still apply their normal
 first-run/last-used model selection behavior.
 
-No model is built into the image. Once Monitor connects, and hourly after that,
+No model is built into the image. Once Perimeter connects, and hourly after that,
 `tinfoil-models.timer` runs `seed-agent-config --models` as `sandbox`, without
 sudo and with write access only to the files it fills. While the `tinfoil`
 connection is ready, it reads Tinfoil's
-`/v1/models` through Monitor and lists every non-deprecated chat model with
+`/v1/models` through Perimeter and lists every non-deprecated chat model with
 tool calling in each client, adding Droid's custom models. Claude Code, Codex
 and Copilot use the stable model with the highest published intelligence;
 Codex keeps its profile's model while Tinfoil still serves it over the
@@ -105,8 +105,8 @@ placeholder from the new configuration. Custom `CODEX_HOME`, `QWEN_HOME`,
 `PI_CODING_AGENT_DIR`, and other config directory overrides require copying
 the corresponding entry to that location.
 
-Monitor still owns the cryptography. The existing system network service
-preserves DNS hostnames through its TUN/SOCKS/SSH connection. Monitor routes
+Perimeter still owns the cryptography. The existing system network service
+preserves DNS hostnames through its TUN/SOCKS/SSH connection. Perimeter routes
 `inference.tinfoil.sh` to its Tinfoil connector, terminates client TLS with its
 CA, checks policy, substitutes the real credential, verifies the enclave,
 and establishes the attested upstream TLS connection. The sandbox's CA
@@ -118,14 +118,14 @@ changed here.
 Static configuration assumes one accessible connector claims
 `inference.tinfoil.sh`, named `tinfoil`. Renaming it requires updating the
 placeholder in the relevant config files. Multiple equally specific claims
-are rejected by Monitor; grant this sandbox access to one such connection.
+are rejected by Perimeter; grant this sandbox access to one such connection.
 `TINFOIL_CONNECTION` is no longer a launcher setting. Other providers and
 any client catalog, plugin, update, or login requests still need their own
-Monitor network permissions.
+Perimeter network permissions.
 
 [Amp model routing](https://ampcode.com/docs/customize/model-routing) configures
 account/workspace connections and requires an endpoint reachable from Amp.
-It cannot consume the sandbox-local Monitor placeholder. [Cursor CLI
+It cannot consume the sandbox-local Perimeter placeholder. [Cursor CLI
 configuration](https://cursor.com/docs/cli/reference/configuration) and
 [Antigravity CLI](https://antigravity.google/docs/cli/overview) expose their
 own model selection, without a local OpenAI-compatible endpoint option in
@@ -161,7 +161,7 @@ Validation and rollout:
   both `models[].repo` and `models[].mwp` in `tinfoil-config.yml`, then building
   and releasing the sandbox image. A source-only package fix does not repair
   the pack already pinned here.
-- Live CVM boot, vendor sign-in, first-run downloads under real Monitor policy,
-  and inference through a deployed Monitor/enclave have not been exercised by
+- Live CVM boot, vendor sign-in, first-run downloads under real Perimeter policy,
+  and inference through a deployed Perimeter/enclave have not been exercised by
   these mock tests. Verify them after rollout, including an existing encrypted
   home. No live credentials are needed for the local tests.

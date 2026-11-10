@@ -3,10 +3,10 @@
   "provider": {
     "tinfoil": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "Tinfoil through Monitor",
+      "name": "Tinfoil through Perimeter",
       "options": {
-        "baseURL": "https://tinfoil.monitor/v1",
-        "apiKey": "monitor"
+        "baseURL": "https://tinfoil.perimeter/v1",
+        "apiKey": "perimeter"
       },
       "models": {}
     }

@@ -3,11 +3,11 @@
 set -euo pipefail
 
 agent_home=${1:-$HOME}
-skill_source=${2:-/usr/local/share/monitor/skills/monitor}
+skill_source=${2:-/usr/local/share/perimeter/skills/perimeter}
 [[ -f $skill_source/SKILL.md ]]
 
 for relative in .claude/skills .codex/skills .agents/skills .gemini/skills .config/opencode/skills; do
-    destination=$agent_home/$relative/monitor
+    destination=$agent_home/$relative/perimeter
     # Keep existing user skills and symlinks, including intentionally broken links.
     if [[ ! -e $destination && ! -L $destination ]]; then
         mkdir -p "$agent_home/$relative"

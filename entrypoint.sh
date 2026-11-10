@@ -12,7 +12,7 @@ install -d -m 0711 "$credentials"
 if "$local_mode"; then
     # dev/sandbox mounts its agent identity; local Podman has no attested CVM keys.
     ssh-keygen -q -t ed25519 -N '' -f "$credentials/host_key"
-    install -m 0644 /run/monitor/id.pub "$credentials/authorized_keys"
+    install -m 0644 /run/perimeter/id.pub "$credentials/authorized_keys"
 else
     # OpenSSH reads the PKCS#8 key the CVM attests, so sshd and reverse SSH prove the same key.
     install -m 0600 /run/tinfoil/keys/host-ssh/private_key.pem "$credentials/host_key"
@@ -30,7 +30,7 @@ elif ! "$local_mode"; then
         child=
         trap '[[ -z "$child" ]] || kill "$child" 2>/dev/null; exit 0' TERM INT
         while true; do
-            /usr/bin/ssh -NT -F /etc/ssh/monitor-reverse.conf monitor &
+            /usr/bin/ssh -NT -F /etc/ssh/perimeter-reverse.conf perimeter &
             child=$!
             wait "$child" || true
             sleep 2 &
@@ -93,11 +93,11 @@ rm -f /etc/monitor/route.json /etc/ssh/ssh_config.d/monitor-route.conf
 if "$local_mode" || [[ ${NO_MONITOR:-} == 1 ]]; then
     # The image installs units in /etc, which takes precedence over /run masks.
     # A bind mount masks this boot without changing the persistent overlay.
-    mount --bind /dev/null /etc/systemd/system/monitor-reverse.service
-    mount --bind /dev/null /etc/systemd/system/monitor-route.service
+    mount --bind /dev/null /etc/systemd/system/perimeter-reverse.service
+    mount --bind /dev/null /etc/systemd/system/perimeter-route.service
 fi
 if [[ ${NO_MONITOR:-} == 1 ]]; then
-    mount --bind /dev/null /etc/systemd/system/monitor-network.service
+    mount --bind /dev/null /etc/systemd/system/perimeter-network.service
     mount --bind /dev/null /etc/systemd/system/tinfoil-models.timer
 else
     # Keep DNS inside Monitor's TUN, including while its SSH connection is down.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Discover and use connections through the monitor's authenticated SSH tunnel."""
+"""Discover and use connections through the Perimeter's authenticated SSH tunnel."""
 
 import argparse
 import contextlib
@@ -30,10 +30,10 @@ import time
 from urllib.parse import urlsplit
 
 
-AGENT_HOST = "agent.monitor"
+AGENT_HOST = "agent.perimeter"
 # Sandbox images ship these; the enable and network commands appear only there.
 SING_BOX = Path("/usr/local/bin/sing-box")
-SYSTEM_CA = Path("/usr/local/share/ca-certificates/monitor.crt")
+SYSTEM_CA = Path("/usr/local/share/ca-certificates/perimeter.crt")
 
 
 class MonitorError(Exception):
@@ -61,13 +61,13 @@ def ssh_failure(detail):
         except ValueError:
             detail += (
                 "\nCheck your SSH alias: HostName must contain only the hostname; set Port separately."
-                "\nMonitor defaults to SSH port 2223. Port 8080 is the owner web API."
+                "\nThe Perimeter defaults to SSH port 2223. Port 8080 is the owner web API."
             )
     return detail
 
 
 class Client:
-    def __init__(self, ssh_host="monitor", ssh_config=None, timeout=300):
+    def __init__(self, ssh_host="perimeter", ssh_config=None, timeout=300):
         self.ssh_host = ssh_host
         self.ssh_config = ssh_config
         self.timeout = timeout
@@ -149,7 +149,7 @@ class Client:
                 raise ValueError()
             return listing
         except (ValueError, KeyError, TypeError) as error:
-            raise MonitorError("invalid connection catalog from the monitor") from error
+            raise MonitorError("invalid connection catalog from the Perimeter") from error
 
     def catalog(self):
         try:
@@ -168,14 +168,14 @@ class Client:
                     raise ValueError()
             return value
         except (ValueError, KeyError, TypeError, AttributeError) as error:
-            raise MonitorError("invalid preset catalog from the monitor") from error
+            raise MonitorError("invalid preset catalog from the Perimeter") from error
 
 def receive(sock, size):
     data = b""
     while len(data) < size:
         part = sock.recv(size - len(data))
         if not part:
-            raise MonitorError("Monitor tunnel closed")
+            raise MonitorError("Perimeter tunnel closed")
         data += part
     return data
 
@@ -246,7 +246,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except (OSError, ValueError, MonitorError) as error:
             if not started:
                 with contextlib.suppress(OSError):
-                    self.send_error(502, "Monitor forwarding failed", str(error))
+                    self.send_error(502, "Perimeter forwarding failed", str(error))
 
 
 class ForwardHandler(socketserver.BaseRequestHandler):
@@ -291,7 +291,7 @@ class Session:
 
     def __enter__(self):
         # A short path also fits macOS's Unix socket path limit.
-        self.temporary = tempfile.TemporaryDirectory(prefix="monitor-", dir="/tmp")
+        self.temporary = tempfile.TemporaryDirectory(prefix="perimeter-", dir="/tmp")
         self.directory = Path(self.temporary.name)
         self.client.control = str(self.directory / "ssh")
         self.log = tempfile.TemporaryFile()
@@ -340,7 +340,7 @@ class Session:
     @contextlib.contextmanager
     def stream(self, host, port):
         self.check()
-        if self.routes and not host.lower().endswith(".monitor"):
+        if self.routes and not host.lower().endswith(".perimeter"):
             host = host.lower()
             matches, best = [], -1
             for connection in self.routes:
@@ -356,7 +356,7 @@ class Session:
             if len(matches) > 1:
                 raise MonitorError(f"ambiguous route to {host}; select an HTTP connection with --connection NAME")
             if matches:
-                host = matches[0] + ".monitor"
+                host = matches[0] + ".perimeter"
         encoded = host.encode("idna")
         if len(encoded) > 255 or not 0 < port < 65536:
             raise MonitorError("invalid forwarding target")
@@ -370,7 +370,7 @@ class Session:
             connection.sendall(b"\x05\x01\x00\x03" + bytes([len(encoded)]) + encoded + struct.pack("!H", port))
             version, status, _, kind = receive(connection, 4)
             if version != 5 or status != 0:
-                raise MonitorError(f"Monitor refused {host}:{port}; check connection access and readiness, or select one with --connection NAME")
+                raise MonitorError(f"the Perimeter refused {host}:{port}; check connection access and readiness, or select one with --connection NAME")
             size = {1: 4, 4: 16}.get(kind)
             if kind == 3:
                 size = receive(connection, 1)[0]
@@ -432,11 +432,11 @@ class Session:
             name = connection["name"]
             if connection["state"] != "ready":
                 if selected:
-                    raise MonitorError(f"connection {name!r} is not ready; check monitor connections")
-                print(f"monitor: connection {name!r} is not ready; other connections remain available", file=sys.stderr)
+                    raise MonitorError(f"connection {name!r} is not ready; check perimeter connections")
+                print(f"perimeter: connection {name!r} is not ready; other connections remain available", file=sys.stderr)
         placeholders, shared = credential_environment(connections)
         for variable, names in shared.items():
-            print(f"monitor: {variable} is shared; use " + ", ".join("$" + name for name in names), file=sys.stderr)
+            print(f"perimeter: {variable} is shared; use " + ", ".join("$" + name for name in names), file=sys.stderr)
         self.connections = connections
         # Without --connection, the server chooses among every connection this identity reaches.
         self.routes = connections if selected else []
@@ -518,7 +518,7 @@ def credential_environment(connections):
     for connection in sorted(connections, key=lambda c: c["name"]):
         for variable, value in sorted(connection["placeholders"].items()):
             name = connection["name"]
-            # Discovery owns the value; accept opaque references and those from older monitors.
+            # Discovery owns the value; accept opaque references and those from older Perimeters.
             if not isinstance(value, str) or not re.fullmatch(r"tfm_[A-Za-z0-9_-]+", value):
                 raise MonitorError(f"invalid placeholder for {name}.{variable}")
             qualified = "MONITOR_CREDENTIAL_" + re.sub(r"[^A-Z0-9_]", "_", f"{name}_{variable}".upper())
@@ -614,7 +614,7 @@ def run_child(session, command, env):
 def shell_command(session, env, shell):
     name = Path(shell).name
     if name not in ("bash", "zsh"):
-        raise MonitorError("monitor shell supports bash and zsh; use --shell /path/to/bash")
+        raise MonitorError("perimeter shell supports bash and zsh; use --shell /path/to/bash")
     label = re.sub(r"[^a-zA-Z0-9_.-]", "_", env["MONITOR_CLIENT_PROFILE"])
     # User startup files are deliberately skipped so they cannot silently change
     # connection selection or routing. zsh always reads its system zshenv first.
@@ -622,11 +622,11 @@ def shell_command(session, env, shell):
                         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key))
     if name == "bash":
         rc = session.directory / "bashrc"
-        rc.write_text(exports + f"\nPS1='[monitor:{label}] \\w\\$ '\n" +
+        rc.write_text(exports + f"\nPS1='[perimeter:{label}] \\w\\$ '\n" +
                       "trap 'jobs -pr | while read -r pid; do kill -HUP -- -\"$pid\" 2>/dev/null; done' EXIT\n")
         return [shell, "--noprofile", "--rcfile", str(rc), "-i"]
     (session.directory / ".zshenv").write_text("unsetopt GLOBAL_RCS\n")
-    (session.directory / ".zshrc").write_text(exports + f"\nPROMPT='[monitor:{label}] %~%# '\n")
+    (session.directory / ".zshrc").write_text(exports + f"\nPROMPT='[perimeter:{label}] %~%# '\n")
     env["ZDOTDIR"] = str(session.directory)
     return [shell, "-d", "-i"]
 
@@ -677,7 +677,7 @@ def mcp_probe(host, port, timeout):
             connection.close()
 
     initialized = request("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
-                                         "clientInfo": {"name": "monitor-client", "version": "1"}})
+                                         "clientInfo": {"name": "perimeter-client", "version": "1"}})
     version = initialized.get("protocolVersion")
     if version not in ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"):
         raise MonitorError(f"unsupported MCP protocol version: {version}")
@@ -705,18 +705,18 @@ def mcp_servers(session, address=("127.0.0.1", 0)):
     for connection in connections:
         name = connection["name"]
         if connection["state"] != "ready":
-            print(f"monitor: MCP connection {name} is {connection['state']}", file=sys.stderr)
+            print(f"perimeter: MCP connection {name} is {connection['state']}", file=sys.stderr)
             continue
         port = address[1] + len(servers) if address[1] else 0
         if port > 65535:
             raise MonitorError("not enough consecutive ports; use --listen with port 0")
-        port = session.listen((address[0], port), functools.partial(ForwardHandler, host=f"{name}.monitor"))
+        port = session.listen((address[0], port), functools.partial(ForwardHandler, host=f"{name}.perimeter"))
         count = mcp_probe(address[0], port, session.client.timeout)
         host = f"[{address[0]}]" if ":" in address[0] else address[0]
         url = f"http://{host}:{port}/"
         servers[name] = {"type": "http", "url": url}
         tools += count
-        print(f"monitor: MCP {name} ready at {url} ({count} tools)", file=sys.stderr, flush=True)
+        print(f"perimeter: MCP {name} ready at {url} ({count} tools)", file=sys.stderr, flush=True)
     if not servers:
         raise MonitorError("no MCP connections are ready")
     return servers, tools
@@ -726,14 +726,14 @@ def managed_command(client, args):
     if args.command == "run":
         command = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
         if not command:
-            raise MonitorError("usage: monitor run [--connection NAME] -- COMMAND [ARG ...]")
+            raise MonitorError("usage: perimeter run [--connection NAME] -- COMMAND [ARG ...]")
     elif args.command == "mcp":
         address = loopback_address(args.listen)
     with Session(client) as session:
         if args.command == "mcp":
             _, count = mcp_servers(session, address)
             if not count:
-                print("monitor: no tools are visible; check connection access and tool review in the web app", file=sys.stderr)
+                print("perimeter: no tools are visible; check connection access and tool review in the web app", file=sys.stderr)
             while True:
                 session.check()
                 time.sleep(0.1)
@@ -776,7 +776,7 @@ def load_profile(args):
             raise ValueError()
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise MonitorError(f"cannot load profile {args.profile!r} from {args.client_config}: {error}") from error
-    args.ssh_host = args.ssh_host or profile.get("ssh_host", "monitor")
+    args.ssh_host = args.ssh_host or profile.get("ssh_host", "perimeter")
     args.ssh_config = args.ssh_config or profile.get("ssh_config")
     if hasattr(args, "connection") and args.command in ("run", "shell"):
         args.connection = args.connection or connections
@@ -784,7 +784,7 @@ def load_profile(args):
 
 def connect(args):
     load_profile(args)
-    args.ssh_host = args.ssh_host or os.environ.get("MONITOR_SSH_HOST", "monitor")
+    args.ssh_host = args.ssh_host or os.environ.get("MONITOR_SSH_HOST", "perimeter")
     args.ssh_config = args.ssh_config or os.environ.get("MONITOR_SSH_CONFIG")
     if args.ssh_config:
         args.ssh_config = os.path.abspath(os.path.expanduser(args.ssh_config))
@@ -805,7 +805,7 @@ def policy_command(client, args):
         result = json.loads(client.request("GET", f"/policy/proposals/{args.id}"))
         if (not isinstance(result, dict) or result.get("id") != args.id
                 or result.get("state") not in ("pending", "approved", "denied", "outdated")):
-            raise MonitorError("invalid proposal status from the monitor")
+            raise MonitorError("invalid proposal status from the Perimeter")
         print(json.dumps(result, indent=2))
         return 0
     if args.policy_action == "propose":
@@ -839,7 +839,7 @@ def network_config(socks_port):
             "rules": [{"query_type": ["A"], "server": "fakeip"},
                       {"action": "predefined", "rcode": "NOERROR"}],
         },
-        "inbounds": [{"type": "tun", "interface_name": "monitor0",
+        "inbounds": [{"type": "tun", "interface_name": "perimeter0",
                       "address": ["100.127.255.1/30"],
                       "auto_route": True, "route_exclude_address": ["10.254.0.1/32", "172.31.255.0/30"]}],
         "outbounds": [{"type": "socks", "tag": "monitor", "server": "127.0.0.1",
@@ -856,7 +856,7 @@ def network_config(socks_port):
 
 def network_command(client):
     if os.geteuid() != 0:
-        raise MonitorError("system-wide routing requires root; use systemctl start monitor-network")
+        raise MonitorError("system-wide routing requires root; use systemctl start perimeter-network")
     with Session(client) as session:
         ca = client.connections()["ca"]
         ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=ca)
@@ -874,14 +874,14 @@ def network_command(client):
 
 def parser():
     p = argparse.ArgumentParser(
-        prog="monitor",
+        prog="perimeter",
         description="Discover and use the external services available to this agent.",
-        epilog="Commands use your paired SSH identity and follow Monitor policy.",
+        epilog="Commands use your paired SSH identity and follow Perimeter policy.",
     )
-    p.add_argument("--ssh-host", help="SSH host alias (default: MONITOR_SSH_HOST or monitor)")
+    p.add_argument("--ssh-host", help="SSH host alias (default: MONITOR_SSH_HOST or perimeter)")
     p.add_argument("--ssh-config", help="SSH configuration file (default: MONITOR_SSH_CONFIG)")
     p.add_argument("--profile", help="local profile in the client configuration")
-    p.add_argument("--client-config", default=str(Path.home() / ".config/monitor/client.json"), help="client profiles JSON file")
+    p.add_argument("--client-config", default=str(Path.home() / ".config/perimeter/client.json"), help="client profiles JSON file")
     p.add_argument("--timeout", type=float, default=300, help="request timeout in seconds (default: 300)")
     commands = p.add_subparsers(dest="command", required=True)
     policy = commands.add_parser("policy", help="inspect policy views and propose TOML edits")
@@ -895,13 +895,13 @@ def parser():
     propose.add_argument("--changes", metavar="FILE", help="structured Change[] JSON file, or - for stdin")
     propose.add_argument("--reason", required=True, help="explain why the connection change is needed")
     propose.add_argument("--delete", action="append", default=[], help="connection-scoped JSON Pointer to remove; repeat for multiple deletions")
-    run = commands.add_parser("run", help="run a local command through Monitor")
+    run = commands.add_parser("run", help="run a local command through the Perimeter")
     run.add_argument("--connection", action="append", default=[], metavar="NAME", help="HTTP connection to use; repeat for several")
     run.add_argument("argv", nargs=argparse.REMAINDER, help="-- COMMAND [ARG ...]")
-    shell = commands.add_parser("shell", help="start a local bash or zsh with Monitor routing")
+    shell = commands.add_parser("shell", help="start a local bash or zsh with Perimeter routing")
     shell.add_argument("--connection", action="append", default=[], metavar="NAME", help="HTTP connection to use; repeat for several")
     shell.add_argument("--shell", default=os.environ.get("SHELL", "/bin/bash"), help="bash or zsh executable; startup files are skipped")
-    mcp = commands.add_parser("mcp", help="connect MCP clients to Monitor")
+    mcp = commands.add_parser("mcp", help="connect MCP clients to the Perimeter")
     serve = mcp.add_subparsers(dest="action", required=True).add_parser("serve", help="serve each ready MCP connection on loopback")
     serve.add_argument("--listen", default="127.0.0.1:8400", help="loopback IP:first port; uses consecutive ports, or free ports with port 0")
     connections = commands.add_parser("connections", help="list reachable connections and their current status")
@@ -970,7 +970,7 @@ def main(argv=None):
                     print("  ".join(str(value).ljust(width) for value, width in zip(row, widths)).rstrip())
             return 0
     except (MonitorError, OSError, http.client.HTTPException, subprocess.SubprocessError, ValueError, KeyError, EOFError) as error:
-        print(f"monitor: {error}", file=sys.stderr)
+        print(f"perimeter: {error}", file=sys.stderr)
         return 1
     except Interrupted as error:
         return 128 + error.signum

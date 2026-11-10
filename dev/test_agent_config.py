@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SEED = runpy.run_path(str(ROOT / "rootfs/usr/local/libexec/seed-agent-config"))
-URL = "https://tinfoil-websearch.monitor/mcp"
+URL = "https://tinfoil-websearch.perimeter/mcp"
 
 
 class AgentConfigTest(unittest.TestCase):
@@ -38,7 +38,7 @@ class AgentConfigTest(unittest.TestCase):
         self.assertEqual(codex["mcp_servers"]["tinfoil_websearch"]["url"], URL)
         self.assertNotIn("model_provider", codex)
         provider = tomllib.loads((self.home / ".codex/tinfoil.config.toml").read_text())
-        self.assertEqual(provider["model_providers"]["tinfoil"]["base_url"], "https://tinfoil.monitor/v1")
+        self.assertEqual(provider["model_providers"]["tinfoil"]["base_url"], "https://tinfoil.perimeter/v1")
         for name in (".claude.json", ".factory/mcp.json"):
             cfg = json.loads((self.home / name).read_text())
             self.assertEqual(cfg["mcpServers"]["tinfoil_websearch"], {"type": "http", "url": URL})
@@ -59,8 +59,8 @@ class AgentConfigTest(unittest.TestCase):
         self.assertIn("docs", cfg["mcpServers"])
 
     def test_preserves_disabled_and_custom_search_settings(self):
-        codex = self.put(".codex/config.toml", '[mcp_servers.tinfoil_websearch]\nenabled = false\nurl = "http://custom.monitor/mcp"\n')
-        claude = self.put(".claude.json", json.dumps({"mcpServers": {"tinfoil_websearch": {"type": "http", "url": "http://custom.monitor/mcp"}}}))
+        codex = self.put(".codex/config.toml", '[mcp_servers.tinfoil_websearch]\nenabled = false\nurl = "http://custom.perimeter/mcp"\n')
+        claude = self.put(".claude.json", json.dumps({"mcpServers": {"tinfoil_websearch": {"type": "http", "url": "http://custom.perimeter/mcp"}}}))
         original = {p: p.read_bytes() for p in (codex, claude)}
         self.seed()
         self.assertEqual(original, {p: p.read_bytes() for p in original})

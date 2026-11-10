@@ -117,12 +117,12 @@ func ownerAPI() (*ownerServer, error) {
 	}
 	systemd := func() bool { _, err := os.Stat(systemdMarker); return err == nil }
 	owner := &ownerServer{key: key, sessionKey: sessionKey, instance: instance,
-		workspace: &workspace{instance: instance, monitor: "/run/monitor", uid: uid, gid: gid, unlock: "/usr/local/bin/workspace-unlock",
+		workspace: &workspace{instance: instance, monitor: "/run/perimeter", uid: uid, gid: gid, unlock: "/usr/local/bin/workspace-unlock",
 			network: func(ctx context.Context) error {
 				if !systemd() {
 					return nil
 				}
-				return exec.CommandContext(ctx, "systemctl", "restart", "monitor-network.service").Run()
+				return exec.CommandContext(ctx, "systemctl", "restart", "perimeter-network.service").Run()
 			}},
 		shells: &shells{
 			command: func() *exec.Cmd { return exec.Command("/usr/sbin/runuser", "-l", sandboxUser) },
