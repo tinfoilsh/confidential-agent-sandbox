@@ -1,12 +1,12 @@
 {
   "name": "tinfoil",
   "engine": "openai",
-  "display_name": "Tinfoil through Monitor",
-  "description": "Tinfoil models via Monitor's attested Tinfoil connector",
+  "display_name": "Tinfoil through Perimeter",
+  "description": "Tinfoil models via the Perimeter's attested Tinfoil connector",
   "api_key_env": "",
-  "base_url": "https://tinfoil.monitor/v1/chat/completions",
+  "base_url": "https://tinfoil.perimeter/v1/chat/completions",
   "models": [],
-  "headers": {"Authorization": "Bearer monitor"},
+  "headers": {"Authorization": "Bearer perimeter"},
   "supports_streaming": true,
   "requires_auth": false
 }

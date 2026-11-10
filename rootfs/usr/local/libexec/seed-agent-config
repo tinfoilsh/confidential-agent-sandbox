@@ -16,11 +16,11 @@ import urllib.request
 from pathlib import Path
 
 TEMPLATES = Path("/usr/local/share/tinfoil")
-WEBSEARCH_URL = "https://tinfoil-websearch.monitor/mcp"
-TINFOIL_URL = "https://tinfoil.monitor/v1"
+WEBSEARCH_URL = "https://tinfoil-websearch.perimeter/mcp"
+TINFOIL_URL = "https://tinfoil.perimeter/v1"
 TINFOIL_CONNECTION = "tinfoil"
 # Monitor replaces this public placeholder with the connection's real key.
-PLACEHOLDER = "monitor"
+PLACEHOLDER = "perimeter"
 # Qwen reads the placeholder from this variable in system-defaults.json.
 QWEN_KEY_VARIABLE = "MONITOR_TINFOIL_API_KEY"
 # /v1/models publishes no output limit; each model reserves this much of its window.
@@ -131,7 +131,7 @@ def seed(directory, templates=TEMPLATES):
     )
     add_provider(directory / ".pi/agent/models.json", templates / "pi.json")
     if os.environ.get("NO_MONITOR") != "1":
-        # Virtual .monitor hosts have no direct-network fallback. The SSH tunnel
+        # Virtual .perimeter hosts have no direct-network fallback. The SSH tunnel
         # authenticates the sandbox; Monitor holds the key and attests the MCP server.
         add_codex_mcp(directory / ".codex/config.toml")
         add_codex_mcp(directory / ".codex/tinfoil.config.toml")
@@ -235,7 +235,7 @@ def write_home(directory, models):
         provider = data.get("providers", {}).get("tinfoil")
         if provider is not None:
             provider["models"] = [
-                {"id": m["id"], "name": f"{title(m)} (Tinfoil through Monitor)",
+                {"id": m["id"], "name": f"{title(m)} (Tinfoil through Perimeter)",
                  "contextWindow": m["context_window"], "maxTokens": OUTPUT_TOKENS}
                 for m in models
             ]
@@ -244,7 +244,7 @@ def write_home(directory, models):
         custom = data.setdefault("customModels", [])
         key = next((c.get("apiKey") for c in custom if c.get("baseUrl") == TINFOIL_URL), PLACEHOLDER)
         custom[:] = [c for c in custom if c.get("baseUrl") != TINFOIL_URL] + [
-            {"model": m["id"], "displayName": f"{title(m)} (Tinfoil through Monitor)", "baseUrl": TINFOIL_URL,
+            {"model": m["id"], "displayName": f"{title(m)} (Tinfoil through Perimeter)", "baseUrl": TINFOIL_URL,
              "apiKey": key, "provider": "generic-chat-completion-api", "maxOutputTokens": OUTPUT_TOKENS}
             for m in models
         ]
@@ -270,7 +270,7 @@ def refresh(directory, payload, root=Path("/")):
 
 
 def tinfoil_ready():
-    listing = subprocess.run(["/usr/local/bin/monitor", "connections", "--json"], capture_output=True,
+    listing = subprocess.run(["/usr/local/bin/perimeter", "connections", "--json"], capture_output=True,
                              check=True, timeout=REQUEST_TIMEOUT)
     return any(c["name"] == TINFOIL_CONNECTION and c["state"] == "ready"
                for c in json.loads(listing.stdout)["connections"])

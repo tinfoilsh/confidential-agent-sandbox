@@ -61,7 +61,7 @@ jobs:
           cat > release-notes.md <<'NOTES'
           Create sandboxes in the dashboard, then run `tinfoil attest-ssh NAME --install` and `ssh NAME`. Rerun attestation after either VM reboots.
 
-          Requires the matching dashboard-provisioning CLI and Monitor releases. The attached template pins the image and runtime and carries provenance attestation. Live CVM provisioning remains untested.
+          Requires the matching dashboard-provisioning CLI and Perimeter releases. The attached template pins the image and runtime and carries provenance attestation. Live CVM provisioning remains untested.
           NOTES
           release_flags=(--latest)
           if [[ "$VERSION" == *-* ]]; then
