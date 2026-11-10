@@ -1,13 +1,13 @@
 ▄▖▘  ▐▘  ▘▜
 ▐ ▌▛▌▜▘▛▌▌▐
-▐ ▌▌▌▐ ▙▌▌▐▖ Sandbox <VERSION>
+▐ ▌▌▌▐ ▙▌▌▐▖ Bunker <VERSION>
 
-Welcome to your sandbox!
+Welcome to your bunker!
 
-Manage connectivity: tinfoil monitor open <name> (on your computer)
-Start coding:        claude, opencode, codex, and more
-Private inference:   add Tinfoil in Monitor, then copy its substitution key:
-                     monitor enable tinfoil <substitution-key>
+Start coding:    claude, opencode, codex, and more
+Tinfoil models:  in opencode, type /models and pick a Tinfoil model
+Approve access:  Open in browser at dash.tinfoil.sh, or on your computer run
+                 tinfoil perimeter open <perimeter-name>
 
 Need another tool? Try nix run nixpkgs#hello or nix shell nixpkgs#jq.
 
