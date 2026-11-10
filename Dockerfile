@@ -95,8 +95,8 @@ RUN sed -i "s/<VERSION>/${SANDBOX_VERSION}/" /etc/motd \
     && chmod 0755 /etc/ca-certificates/update.d/java-fresh \
     # tinfoil-models.service fills these as sandbox, without sudo.
     && chown -R sandbox:sandbox /etc/opencode /etc/crush /etc/qwen-code /usr/local/share/tinfoil \
-    && chmod 0755 /usr/local/libexec/workspace-keys /usr/local/bin/workspace-unlock /usr/local/bin/monitor /usr/local/libexec/seed-agent-skills /usr/local/libexec/seed-agent-config /usr/local/libexec/enable-tinfoil \
-    && for script in /entrypoint /healthcheck.sh /usr/local/libexec/seed-agent-skills /usr/local/libexec/enable-tinfoil /etc/profile.d/zz-monitor.sh; do \
+    && chmod 0755 /usr/local/libexec/workspace-keys /usr/local/bin/workspace-unlock /usr/local/bin/monitor /usr/local/libexec/seed-agent-skills /usr/local/libexec/seed-agent-config \
+    && for script in /entrypoint /healthcheck.sh /usr/local/libexec/seed-agent-skills /etc/profile.d/zz-monitor.sh; do \
          bash -n "$script" || exit 1; \
        done \
     && /usr/local/bin/monitor run --help > /dev/null \
