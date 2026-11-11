@@ -130,6 +130,7 @@ def seed(directory, templates=TEMPLATES):
         (templates / "goose.json").read_text(),
     )
     add_provider(directory / ".pi/agent/models.json", templates / "pi.json")
+    update_json(directory / ".config/opencode/tui.json", lambda data: data.setdefault("theme", "system"))
     if os.environ.get("NO_MONITOR") != "1":
         # Virtual .perimeter hosts have no direct-network fallback. The SSH tunnel
         # authenticates the sandbox; Monitor holds the key and attests the MCP server.

@@ -39,7 +39,7 @@ RUN yes | DEBIAN_FRONTEND=noninteractive unminimize \
     && locale-gen en_US.UTF-8 \
     && usermod -l sandbox -d /home/sandbox -m ubuntu && groupmod -n sandbox ubuntu \
     && groupadd -f docker \
-    && usermod -aG sudo,adm,systemd-journal,docker -s /bin/bash sandbox \
+    && usermod -aG adm,systemd-journal,docker -s /bin/bash sandbox \
     && passwd -l sandbox \
     && mkdir /workspace \
     && rm -f /usr/sbin/policy-rc.d \
@@ -66,7 +66,7 @@ RUN yes | DEBIAN_FRONTEND=noninteractive unminimize \
     && printf '%s\n' '[ -n "${MONITOR_CLIENT_PROFILE:-}" ] || . /etc/profile.d/nix.sh' >> /etc/bash.bashrc \
     && rm -f /etc/ssh/ssh_host_* \
     # PAM displays our static /etc/motd instead of Ubuntu's generated welcome.
-    && rm -f /etc/update-motd.d/* /run/motd.dynamic \
+    && rm -f /etc/update-motd.d/* /run/motd.dynamic /etc/legal \
     && echo 'session optional pam_motd.so noupdate' >> /etc/pam.d/runuser-l \
     && rm -rf /var/lib/apt/lists/*
 
