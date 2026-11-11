@@ -119,7 +119,7 @@ class AgentConfigTest(unittest.TestCase):
         SEED["refresh"](self.home, payload, root)
         self.assertEqual(files, {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file()})
 
-    def test_no_monitor_does_not_install_monitor_mcp(self):
+    def test_no_monitor_does_not_install_perimeter_mcp(self):
         self.seed("1")
         self.assertFalse((self.home / ".claude.json").exists())
         self.assertFalse((self.home / ".codex/config.toml").exists())
