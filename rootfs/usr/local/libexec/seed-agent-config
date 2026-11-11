@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""Add Tinfoil providers and Monitor web search; keep user selections.
+"""Add Tinfoil providers and Perimeter web search; keep user selections.
 
 With --models, fill every Tinfoil provider with the models Tinfoil serves now.
 """
@@ -19,10 +19,10 @@ TEMPLATES = Path("/usr/local/share/tinfoil")
 WEBSEARCH_URL = "https://tinfoil-websearch.perimeter/mcp"
 TINFOIL_URL = "https://tinfoil.perimeter/v1"
 TINFOIL_CONNECTION = "tinfoil"
-# Monitor replaces this public placeholder with the connection's real key.
+# The Perimeter replaces this public placeholder with the connection's real key.
 PLACEHOLDER = "perimeter"
 # Qwen reads the placeholder from this variable in system-defaults.json.
-QWEN_KEY_VARIABLE = "MONITOR_TINFOIL_API_KEY"
+QWEN_KEY_VARIABLE = "PERIMETER_TINFOIL_API_KEY"
 # /v1/models publishes no output limit; each model reserves this much of its window.
 OUTPUT_TOKENS = 65536
 # The Codex profile uses the Responses API, which not every model serves.
@@ -133,7 +133,7 @@ def seed(directory, templates=TEMPLATES):
     update_json(directory / ".config/opencode/tui.json", lambda data: data.setdefault("theme", "system"))
     if os.environ.get("NO_MONITOR") != "1":
         # Virtual .perimeter hosts have no direct-network fallback. The SSH tunnel
-        # authenticates the sandbox; Monitor holds the key and attests the MCP server.
+        # authenticates the sandbox; the Perimeter holds the key and attests the MCP server.
         add_codex_mcp(directory / ".codex/config.toml")
         add_codex_mcp(directory / ".codex/tinfoil.config.toml")
         for relative in (".claude.json", ".factory/mcp.json"):

@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""Prepare the measured owner login key and Monitor bootstrap route."""
+"""Prepare the measured owner login key and Perimeter bootstrap route."""
 
 import base64
 import os
@@ -22,7 +22,7 @@ def prepare(directory, environment):
     authorized.write_text(owner_key(environment["SANDBOX_OWNER_PUBLIC_KEY"]))
     authorized.chmod(0o644)
     instance = str(uuid.UUID(environment["SANDBOX_INSTANCE_ID"]))
-    (directory / "monitor-bootstrap.conf").write_text(f"User sandbox-v2:{instance}\n")
+    (directory / "perimeter-bootstrap.conf").write_text(f"User sandbox-v2:{instance}\n")
 
 
 if __name__ == "__main__":

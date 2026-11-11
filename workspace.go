@@ -22,8 +22,8 @@ import (
 
 const (
 	agentIdentityFile = "identity"
-	monitorPinFile    = "known_hosts"
-	monitorPinHost    = "perimeter "
+	perimeterPinFile  = "known_hosts"
+	perimeterPinHost  = "perimeter "
 	// Formatting a new workspace can take minutes.
 	unlockTimeout = 10 * time.Minute
 )
@@ -33,12 +33,12 @@ var (
 	errIdentityConflict = ownerError{"identity_conflict", http.StatusConflict}
 )
 
-// workspace owns this boot's Monitor credentials in /run/perimeter and its volume unlock.
+// workspace owns this boot's Perimeter credentials in /run/perimeter and its volume unlock.
 type workspace struct {
-	instance string
-	monitor  string // directory of the Monitor identity and Monitor pin
-	uid, gid int    // the sandbox user, who reads both
-	unlock   string // workspace-unlock
+	instance  string
+	perimeter string // directory of the Perimeter identity and Perimeter pin
+	uid, gid  int    // the sandbox user, who reads both
+	unlock    string // workspace-unlock
 	// network restarts perimeter-network once systemd runs it.
 	network func(context.Context) error
 
@@ -61,7 +61,7 @@ type enrollInput struct {
 }
 
 // status reports whether the volume is mounted, never inferred from missing files, and
-// the Monitor identity and Monitor pin this boot holds.
+// the Perimeter identity and Perimeter pin this boot holds.
 func (w *workspace) status(ctx context.Context) (status, error) {
 	s := status{Protocol: ownerProtocol, InstanceID: w.instance}
 	volume, err := w.run(ctx, nil, "--status")
@@ -74,9 +74,9 @@ func (w *workspace) status(ctx context.Context) (status, error) {
 		key := authorizedKey(agent.PublicKey())
 		s.MonitorIdentity = &key
 	}
-	pin, pinErr := os.ReadFile(filepath.Join(w.monitor, monitorPinFile))
+	pin, pinErr := os.ReadFile(filepath.Join(w.perimeter, perimeterPinFile))
 	if pinErr == nil {
-		key := strings.TrimSuffix(strings.TrimPrefix(string(pin), monitorPinHost), "\n")
+		key := strings.TrimSuffix(strings.TrimPrefix(string(pin), perimeterPinHost), "\n")
 		s.MonitorHostKey = &key
 	} else if !errors.Is(pinErr, os.ErrNotExist) {
 		err = errors.Join(err, pinErr)
@@ -84,15 +84,15 @@ func (w *workspace) status(ctx context.Context) (status, error) {
 	return s, err
 }
 
-// enroll installs the Monitor identity and Monitor pin, then unlocks the volume with the
-// disk key. Re-enrolling the same identity only repins a restarted Monitor. Initializing
+// enroll installs the Perimeter identity and Perimeter pin, then unlocks the volume with the
+// disk key. Re-enrolling the same identity only repins a restarted Perimeter. Initializing
 // is left to the volume worker, which refuses a nonblank disk.
 func (w *workspace) enroll(ctx context.Context, in enrollInput) (status, error) {
 	seed, seedErr := base64.RawURLEncoding.DecodeString(in.MonitorIdentitySeed)
 	disk, diskErr := base64.RawURLEncoding.DecodeString(in.DiskKey)
 	defer clear(seed)
 	defer clear(disk)
-	pin, pinErr := monitorPin(in.MonitorHostKey)
+	pin, pinErr := perimeterPin(in.MonitorHostKey)
 	if seedErr != nil || diskErr != nil || pinErr != nil || len(seed) != ed25519.SeedSize || len(disk) != 32 {
 		return status{}, errors.New("enroll needs a 32-byte monitor_identity_seed and disk_key and an ssh-ed25519 monitor_host_key")
 	}
@@ -111,7 +111,7 @@ func (w *workspace) enroll(ctx context.Context, in enrollInput) (status, error) 
 	if existing != nil && !bytes.Equal(existing.PublicKey().Marshal(), public.Marshal()) {
 		return status{}, errIdentityConflict
 	}
-	changed, err := w.install(monitorPinFile, pin)
+	changed, err := w.install(perimeterPinFile, pin)
 	if err == nil && existing == nil {
 		var block *pem.Block
 		if block, err = ssh.MarshalPrivateKey(agent, ""); err == nil {
@@ -140,9 +140,9 @@ func (w *workspace) enroll(ctx context.Context, in enrollInput) (status, error) 
 	return w.status(ctx)
 }
 
-// identity is the installed Monitor identity, or nil.
+// identity is the installed Perimeter identity, or nil.
 func (w *workspace) identity() (ssh.Signer, error) {
-	data, err := os.ReadFile(filepath.Join(w.monitor, agentIdentityFile))
+	data, err := os.ReadFile(filepath.Join(w.perimeter, agentIdentityFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -155,17 +155,17 @@ func (w *workspace) identity() (ssh.Signer, error) {
 
 // install atomically replaces one file the sandbox user reads, reporting whether it changed.
 func (w *workspace) install(name string, data []byte) (bool, error) {
-	path := filepath.Join(w.monitor, name)
+	path := filepath.Join(w.perimeter, name)
 	if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, data) {
 		return false, nil
 	}
-	if err := os.MkdirAll(w.monitor, 0o750); err != nil {
+	if err := os.MkdirAll(w.perimeter, 0o750); err != nil {
 		return false, err
 	}
-	if err := os.Chown(w.monitor, -1, w.gid); err != nil {
+	if err := os.Chown(w.perimeter, -1, w.gid); err != nil {
 		return false, err
 	}
-	file, err := os.CreateTemp(w.monitor, "."+name+"-")
+	file, err := os.CreateTemp(w.perimeter, "."+name+"-")
 	if err != nil {
 		return false, err
 	}
@@ -186,13 +186,13 @@ func (w *workspace) run(ctx context.Context, input []byte, args ...string) (stri
 	return strings.ToValidUTF8(string(output), ""), err
 }
 
-// monitorPin accepts exactly "ssh-ed25519 <key>" and returns its known_hosts line.
-func monitorPin(key string) ([]byte, error) {
+// perimeterPin accepts exactly "ssh-ed25519 <key>" and returns its known_hosts line.
+func perimeterPin(key string) ([]byte, error) {
 	parsed, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(key))
 	if err != nil || len(rest) != 0 || parsed.Type() != ssh.KeyAlgoED25519 || authorizedKey(parsed) != key {
 		return nil, errors.New("monitor_host_key must be one ssh-ed25519 public key without a comment")
 	}
-	return []byte(monitorPinHost + key + "\n"), nil
+	return []byte(perimeterPinHost + key + "\n"), nil
 }
 
 func authorizedKey(key ssh.PublicKey) string {
