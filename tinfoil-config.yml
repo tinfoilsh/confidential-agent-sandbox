@@ -16,7 +16,7 @@ networks:
 attested-keys:
   - id: host-ssh
     key: ecdsa-p256
-  # Owner sessions are Noise handshakes to this per-boot key, relayed through Perimeter.
+  # Owner sessions are Noise handshakes to this per-boot key.
   - id: owner-session
     key: x25519
 
@@ -81,3 +81,4 @@ shim:
   authenticated: false
   paths:
     - /healthz
+    - /owner/ws

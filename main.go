@@ -50,6 +50,9 @@ func run() error {
 		Handler:           healthHandler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	if os.Getenv("NO_MONITOR") == "1" {
+		server.Handler = routeServer.Handler
+	}
 	defer server.Close()
 	socketServer := &http.Server{ReadHeaderTimeout: 10 * time.Second}
 	defer socketServer.Close()
@@ -128,7 +131,7 @@ func ownerAPI() (*ownerServer, error) {
 			command: func() *exec.Cmd { return exec.Command("/usr/sbin/runuser", "-l", sandboxUser) },
 			ready: func() error {
 				if !systemd() {
-					return ownerError{"the workspace is locked; enroll it to unlock it first", http.StatusConflict}
+					return ownerError{"the workspace is locked; unlock it first", http.StatusConflict}
 				}
 				return nil
 			}}}

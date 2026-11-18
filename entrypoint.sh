@@ -97,6 +97,7 @@ fi
 if [[ ${NO_MONITOR:-} == 1 ]]; then
     mount --bind /dev/null /etc/systemd/system/perimeter-network.service
     mount --bind /dev/null /etc/systemd/system/tinfoil-models.timer
+    mount --bind /etc/motd.perimeterless /etc/motd
 else
     # Keep DNS inside the Perimeter's TUN, including while its SSH connection is down.
     printf 'nameserver 100.127.255.2\noptions timeout:1 attempts:2\n' > /etc/resolv.conf

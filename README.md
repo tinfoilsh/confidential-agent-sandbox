@@ -11,14 +11,11 @@ ssh work
 
 Rerun `attest-ssh` after either VM reboots. Back up the CLI's encryption credentials.
 
-For direct networking, create the sandbox without a Perimeter. This sets
-the measured `NO_MONITOR` environment
-variable to `1` and omits the host network policy. The sandbox keeps its normal
-DNS and disables both Perimeter tunnels. The same commands verify attestation and
-unlock the workspace through the published SSH port; the CLI warns that traffic
-is not tunneled through Perimeter. Any other value keeps Perimeter enabled.
-Use a release containing this option and the matching CLI; older templates do
-not declare `NO_MONITOR` and cannot accept it.
+For direct networking, create the sandbox without a Perimeter, with
+`tinfoil bunker create NAME --no-perimeter --tag VERSION` or from the
+dashboard. The CLI and the terminal verify its attestation, and it opens in
+the browser at `https://terminal.tinfoil.sh/bunker/<id>`. It has no Tinfoil
+model providers; those need a Perimeter.
 
 SSH logins show a short Tinfoil welcome in place of Ubuntu's default MOTD.
 The release build stamps its version into the banner; local builds show `dev`
