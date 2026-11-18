@@ -90,7 +90,7 @@ COPY --chmod=0755 entrypoint.sh /entrypoint
 COPY rootfs/ /
 COPY --from=build /workspace-attestation /usr/local/libexec/workspace-attestation
 ARG SANDBOX_VERSION=dev
-RUN sed -i "s/<VERSION>/${SANDBOX_VERSION}/" /etc/motd \
+RUN sed -i "s/<VERSION>/${SANDBOX_VERSION}/" /etc/motd /etc/motd.perimeterless \
     && chmod 0440 /etc/sudoers.d/90-sandbox \
     && chmod 0755 /etc/ca-certificates/update.d/java-fresh \
     # tinfoil-models.service fills these as sandbox, without sudo.

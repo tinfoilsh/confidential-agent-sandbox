@@ -108,6 +108,11 @@ func (s *ownerServer) route(call Call) func(context.Context) (any, error) {
 			// An unlock outlives a lost connection; a retry waits for it and finds it done.
 			return func(ctx context.Context) (any, error) { return s.workspace.enroll(context.WithoutCancel(ctx), in) }
 		}
+	case "POST /unlock":
+		var in unlockInput
+		if json.Unmarshal(call.Body, &in) == nil {
+			return func(ctx context.Context) (any, error) { return s.workspace.open(context.WithoutCancel(ctx), in) }
+		}
 	}
 	return nil
 }

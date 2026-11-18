@@ -24,6 +24,7 @@ const (
 	agentIdentityFile = "identity"
 	perimeterPinFile  = "known_hosts"
 	perimeterPinHost  = "perimeter "
+	diskKeySize       = 32
 	// Formatting a new workspace can take minutes.
 	unlockTimeout = 10 * time.Minute
 )
@@ -53,11 +54,15 @@ type status struct {
 	MonitorHostKey  *string `json:"monitor_host_key"`
 }
 
+type unlockInput struct {
+	DiskKey         string `json:"disk_key"`
+	AllowInitialize bool   `json:"allow_initialize"`
+}
+
 type enrollInput struct {
 	MonitorIdentitySeed string `json:"monitor_identity_seed"`
 	MonitorHostKey      string `json:"monitor_host_key"`
-	DiskKey             string `json:"disk_key"`
-	AllowInitialize     bool   `json:"allow_initialize"`
+	unlockInput
 }
 
 // status reports whether the volume is mounted, never inferred from missing files, and
@@ -93,7 +98,7 @@ func (w *workspace) enroll(ctx context.Context, in enrollInput) (status, error) 
 	defer clear(seed)
 	defer clear(disk)
 	pin, pinErr := perimeterPin(in.MonitorHostKey)
-	if seedErr != nil || diskErr != nil || pinErr != nil || len(seed) != ed25519.SeedSize || len(disk) != 32 {
+	if seedErr != nil || diskErr != nil || pinErr != nil || len(seed) != ed25519.SeedSize || len(disk) != diskKeySize {
 		return status{}, errors.New("enroll needs a 32-byte monitor_identity_seed and disk_key and an ssh-ed25519 monitor_host_key")
 	}
 	agent := ed25519.NewKeyFromSeed(seed)
@@ -128,8 +133,12 @@ func (w *workspace) enroll(ctx context.Context, in enrollInput) (status, error) 
 	if err != nil {
 		return status{}, err
 	}
+	return w.openLocked(ctx, disk, in.AllowInitialize)
+}
+
+func (w *workspace) openLocked(ctx context.Context, disk []byte, initialize bool) (status, error) {
 	args := []string{}
-	if in.AllowInitialize {
+	if initialize {
 		args = append(args, "--initialize")
 	}
 	unlockCtx, cancel := context.WithTimeout(ctx, unlockTimeout)
@@ -138,6 +147,18 @@ func (w *workspace) enroll(ctx context.Context, in enrollInput) (status, error) 
 		return status{}, ownerError{"unlock failed: " + strings.TrimSpace(reply), http.StatusBadGateway}
 	}
 	return w.status(ctx)
+}
+
+// open unlocks the volume with the disk key, or initializes it when allowed and blank.
+func (w *workspace) open(ctx context.Context, in unlockInput) (status, error) {
+	disk, err := base64.RawURLEncoding.DecodeString(in.DiskKey)
+	defer clear(disk)
+	if err != nil || len(disk) != diskKeySize {
+		return status{}, errors.New("unlock needs a 32-byte disk_key")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.openLocked(ctx, disk, in.AllowInitialize)
 }
 
 // identity is the installed Perimeter identity, or nil.
