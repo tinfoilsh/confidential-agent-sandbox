@@ -87,7 +87,7 @@ jobs:
           SOURCE_DATE_EPOCH: 0
         with:
           context: .
-          push: true
+          outputs: type=image,push=true,compression=zstd,compression-level=19,force-compression=true,oci-mediatypes=true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
