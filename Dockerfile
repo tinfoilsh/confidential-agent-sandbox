@@ -23,7 +23,7 @@ ARG SING_BOX_SHA256=e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5
 RUN yes | DEBIAN_FRONTEND=noninteractive unminimize \
     && rm -f /etc/dpkg/dpkg.cfg.d/docker-apt-speedup \
     && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates ca-certificates-java default-jre-headless \
+      ca-certificates p11-kit \
       pciutils \
       curl \
       git \
@@ -93,6 +93,7 @@ ARG SANDBOX_VERSION=dev
 RUN sed -i "s/<VERSION>/${SANDBOX_VERSION}/" /etc/motd /etc/motd.perimeterless \
     && chmod 0440 /etc/sudoers.d/90-sandbox \
     && chmod 0755 /etc/ca-certificates/update.d/java-fresh \
+    && mkdir /etc/ssl/certs/java && /etc/ca-certificates/update.d/java-fresh \
     # tinfoil-models.service fills these as sandbox, without sudo.
     && chown -R sandbox:sandbox /etc/opencode /etc/crush /etc/qwen-code /usr/local/share/tinfoil \
     && chmod 0755 /usr/local/libexec/workspace-keys /usr/local/bin/workspace-unlock /usr/local/bin/perimeter /usr/local/libexec/seed-agent-skills /usr/local/libexec/seed-agent-config \
