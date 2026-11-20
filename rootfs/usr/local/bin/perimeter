@@ -436,9 +436,7 @@ class Session:
                 if selected:
                     raise MonitorError(f"connection {name!r} is not ready; check perimeter connections")
                 print(f"perimeter: connection {name!r} is not ready; other connections remain available", file=sys.stderr)
-        placeholders, shared = credential_environment(connections)
-        for variable, names in shared.items():
-            print(f"perimeter: {variable} is shared; use " + ", ".join("$" + name for name in names), file=sys.stderr)
+        placeholders = credential_environment(connections)
         self.connections = connections
         # Without --connection, the server chooses among every connection this identity reaches.
         self.routes = connections if selected else []
@@ -517,7 +515,7 @@ def credential_environment(connections):
             by_variable.setdefault(variable, []).append(entry)
             by_name.setdefault(qualified, []).append(entry)
 
-    env, qualified_names = {}, {}
+    env = {}
     for name, variable, value, qualified in credentials:
         if len(by_name[qualified]) > 1:
             suffix = hashlib.sha256(json.dumps([name, variable]).encode()).hexdigest()[:12].upper()
@@ -525,17 +523,13 @@ def credential_environment(connections):
             while qualified in by_name or qualified in env:
                 qualified += "_"
         env[qualified] = value
-        qualified_names[name, variable] = qualified
 
-    shared = {}
     for variable, entries in by_variable.items():
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable) or variable in RESERVED_ENV or variable.startswith(("MONITOR_", "GIT_CONFIG_", "LD_", "DYLD_")):
             continue
         if len(entries) == 1:
             env[variable] = entries[0][2]
-        else:
-            shared[variable] = [qualified_names[name, variable] for name, variable, _, _ in entries]
-    return env, shared
+    return env
 
 GIT_HELPER = '''import sys
 SLOTS = []
@@ -574,9 +568,7 @@ def add_git_config(env, settings):
 
 def env_command(client):
     connections = [c for c in client.connections()["connections"] if c["placeholders"] is not None]
-    placeholders, shared = credential_environment(connections)
-    for variable, names in shared.items():
-        print(f"perimeter: {variable} is shared; use " + ", ".join("$" + name for name in names), file=sys.stderr)
+    placeholders = credential_environment(connections)
     env = {"GIT_CONFIG_COUNT": os.environ.get("GIT_CONFIG_COUNT", "0"), **placeholders}
     if "GITHUB_TOKEN" in placeholders:
         env["GH_TOKEN"] = placeholders["GITHUB_TOKEN"]
