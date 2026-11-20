@@ -171,6 +171,8 @@ def write_system(models, root):
     default = models[0]
 
     def opencode(data):
+        data["model"] = "tinfoil/" + default["id"]
+        data["provider"]["tinfoil"]["whitelist"] = [m["id"] for m in models]
         data["provider"]["tinfoil"]["models"] = {
             m["id"]: {"name": title(m), "limit": {"context": m["context_window"], "output": OUTPUT_TOKENS}}
             for m in models
