@@ -20,6 +20,8 @@ const (
 	maxShellSessions = 8
 	// maxShellChunk bounds the output one message carries.
 	maxShellChunk = 64 << 10
+	// maxShellReplies bounds the chaff answers and fake echoes waiting to be written; more are dropped.
+	maxShellReplies = 16
 
 	shellTerminal   = "xterm-256color"
 	maxShellInput   = 64 << 10
@@ -31,6 +33,7 @@ var shellWriteTimeout = 10 * time.Second
 
 type shellInput struct {
 	Input  []byte `json:"input"`
+	Chaff  []byte `json:"chaff"`
 	Resize *struct {
 		Cols uint32 `json:"cols"`
 		Rows uint32 `json:"rows"`
@@ -56,7 +59,15 @@ func (sh *shells) serve(ctx context.Context, c *Channel, cols, rows uint32) {
 		c.Conn.Close(websocket.StatusInternalError, err.Error())
 		return
 	}
+	replies := make(chan []byte, maxShellReplies)
 	go func() {
+		for ignore := range replies {
+			message, _ := json.Marshal(map[string][]byte{"ignore": ignore})
+			c.Write(ctx, message)
+		}
+	}()
+	go func() {
+		defer close(replies)
 		for {
 			var in shellInput
 			message, err := c.Read(ctx, maxShellInput)
@@ -77,6 +88,23 @@ func (sh *shells) serve(ctx context.Context, c *Channel, cols, rows uint32) {
 				terminal.Close()
 				cmd.Process.Kill()
 				return
+			}
+			// As sshd does, a canonical terminal with echo off answers input as if it echoed.
+			ignore := in.Chaff
+			if len(in.Input) > 0 && in.Input[0] != '\r' {
+				control(terminal, func(fd int) error {
+					tio, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+					if err == nil && tio.Lflag&(unix.ICANON|unix.ECHO) == unix.ICANON {
+						ignore = make([]byte, len(in.Input))
+					}
+					return err
+				})
+			}
+			if len(ignore) > 0 {
+				select {
+				case replies <- ignore:
+				default:
+				}
 			}
 		}
 	}()
