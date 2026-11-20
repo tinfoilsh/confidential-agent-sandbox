@@ -50,9 +50,10 @@ routed without the CLI; `eval "$(perimeter env)"` exports the same placeholders
 and Git credential setup into the current shell, so plain `gh`, `git` and `curl`
 authenticate. Run it again after connections change.
 
-In a bunker, agent settings preconfigure only the `tinfoil_websearch` MCP
-connection. Add any other ready MCP connection yourself, for example
-`claude mcp add --transport http NAME https://NAME.perimeter/mcp`.
+`perimeter launch claude` after `perimeter setup --mcp` connects Claude to every
+ready MCP connection. In a Tinfoil bunker, agent settings preconfigure only the
+`tinfoil_websearch` MCP connection. Add any other ready MCP connection yourself,
+for example `claude mcp add --transport http NAME https://NAME.perimeter/mcp`.
 
 On a trusted device the CLI finds the `perimeter` SSH host in
 `~/.config/perimeter/launch/default/ssh_config` or
